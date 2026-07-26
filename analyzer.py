@@ -216,6 +216,43 @@ def format_reasoning_context(context: dict) -> str:
     return "\n".join(lines)
 
 
+def _format_custom_instructions(instructions: list[str]) -> str:
+    if not instructions:
+        return ""
+    lines = ["USER CUSTOM INSTRUCTIONS:"]
+    for instr in instructions:
+        lines.append(f"- {instr}")
+    return "\n".join(lines)
+
+
+def identify_priorities(schema: str, structural_kg: dict, diagnostic_kg: dict) -> list:
+    prompt = _format_prompt(
+        _load_prompt("priorities_prompt.md"),
+        schema=schema,
+        structural_kg=str(structural_kg),
+        diagnostic_kg=str(diagnostic_kg),
+    )
+    raw = llm_client.ask_json(prompt, system_context="You are a strategy consultant. Return only valid JSON.")
+    priorities = raw.get("priorities", []) if isinstance(raw, dict) else []
+    if not priorities:
+        return []
+    return priorities
+
+
+def generate_briefing(schema: str, structural_kg: dict, diagnostic_kg: dict, priorities: list) -> dict:
+    prompt = _format_prompt(
+        _load_prompt("briefing_prompt.md"),
+        schema=schema,
+        structural_kg=str(structural_kg),
+        diagnostic_kg=str(diagnostic_kg),
+        priorities=str(priorities),
+    )
+    raw = llm_client.ask_json(prompt, system_context="You are a strategy consultant. Return only valid JSON.")
+    if not isinstance(raw, dict):
+        return {"priority_insights": [], "suggested_questions": []}
+    return raw
+
+
 def extract_strategy_section(strategy_name: str) -> str:
     """Extract a single strategy section from the reasoning framework by name."""
     framework = load_reasoning_framework()
@@ -251,7 +288,7 @@ def get_full_reasoning_framework(schema: str, structural_kg: dict, diagnostic_kg
 #  Chain-of-Thought pipeline
 # =============================================================
 
-def reason_and_plan(question: str, schema: str, structural_kg: dict, diagnostic_kg: dict, reasoning_framework: str, context: list[dict] = None) -> tuple:
+def reason_and_plan(question: str, schema: str, structural_kg: dict, diagnostic_kg: dict, reasoning_framework: str, context: list[dict] = None, custom_instructions: list[str] = None) -> tuple:
     # Fast-path for follow-ups: skip reasoning for simple drill-down questions
     if context:
         clean_question = re.sub(r"[^a-z0-9 ]", "", question.lower()).strip()
@@ -293,6 +330,7 @@ def reason_and_plan(question: str, schema: str, structural_kg: dict, diagnostic_
         diagnostic_kg=format_diagnostic_kg(diagnostic_kg),
         question=question,
         context_section=context_section,
+        custom_instructions=_format_custom_instructions(custom_instructions or []),
     )
 
     print("  [Phase 1] Reasoning about the question...", flush=True)
@@ -337,8 +375,8 @@ def build_step_summary(analysis_state: list[dict]) -> str:
     return "\n".join(lines)
 
 
-def agentic_answer(question: str, df, schema: str, structural_kg: dict, diagnostic_kg: dict, reasoning_framework: str, context: list[dict] = None) -> str:
-    reasoning, plan, strategy, persona = reason_and_plan(question, schema, structural_kg, diagnostic_kg, reasoning_framework, context=context)
+def agentic_answer(question: str, df, schema: str, structural_kg: dict, diagnostic_kg: dict, reasoning_framework: str, context: list[dict] = None, custom_instructions: list[str] = None) -> str:
+    reasoning, plan, strategy, persona = reason_and_plan(question, schema, structural_kg, diagnostic_kg, reasoning_framework, context=context, custom_instructions=custom_instructions)
 
     print("\n  [Phase 1] Reasoning:")
     if strategy:
@@ -362,11 +400,13 @@ def agentic_answer(question: str, df, schema: str, structural_kg: dict, diagnost
             lines.append(f"A: {turn.get('summary', '')}")
         context_section = "\n".join(lines)
 
+    custom_instructions_str = _format_custom_instructions(custom_instructions or [])
     system = f"""You are a data analyst investigating a question about data.
 
 COLUMN NAMES AND TYPES:
 {schema}
 
+{custom_instructions_str}
 CRITICAL RULES:
 1. `df` is SHARED across ALL steps. Columns you add to `df` are available in future steps.
 2. All variables you create also persist (e.g., `monthly_sales`, `q4_data`, `result`).

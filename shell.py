@@ -87,11 +87,18 @@ class AnalystShell(cmd.Cmd):
             print("  Next: use 'load <path>' to import a CSV file.")
         elif not p.has_structural_kg():
             print("  Next: use 'init' to build knowledge graphs.")
-        elif p.current_analysis:
-            print("  Use 'follow <question>' to continue this analysis.")
-            print("  Use 'analyze <question>' to start a new analysis.")
         else:
-            print("  Use 'analyze <question>' to start an analysis.")
+            if p.priorities:
+                print(f"  Priorities: {len(p.priorities)} defined. Use 'priorities' to view.")
+            if p.custom_instructions:
+                print(f"  Custom instructions: {len(p.custom_instructions)} saved.")
+            if p.current_analysis:
+                print("  Use 'follow <question>' to continue this analysis.")
+                print("  Use 'analyze <question>' to start a new analysis.")
+            else:
+                print("  Use 'analyze <question>' to start an analysis.")
+                if not p.priorities:
+                    print("  Use 'priorities' to generate strategic priorities first.")
 
     def _check_llm(self):
         if not llm_client.check_availability():
@@ -175,6 +182,8 @@ class AnalystShell(cmd.Cmd):
         fw_avail = "[x]" if bool(p.reasoning_framework) else "-"
         fw_cached = "(disk)" if (p.metadata_dir / "reasoning_framework.json").exists() else ""
         print(f"  Framework: {fw_avail} {fw_cached}")
+        print(f"  Priorities: {len(p.priorities)} defined" if p.priorities else "  Priorities: -")
+        print(f"  Custom instructions: {len(p.custom_instructions)} saved" if p.custom_instructions else "  Custom instructions: -")
 
         analyses = self._existing_analyses()
         print(f"  Analyses: {len(analyses)}")
@@ -193,8 +202,8 @@ class AnalystShell(cmd.Cmd):
 
         categories = {
             "Setup":    ["load", "init", "rename"],
-            "Knowledge": ["status", "view", "welcome"],
-            "Analysis":  ["analyze", "follow"],
+            "Knowledge": ["status", "view", "welcome", "priorities", "briefing"],
+            "Analysis":  ["analyze", "follow", "instructions"],
             "Review":    ["review", "analyses", "list", "export"],
             "Manage":    ["delete"],
             "Shell":     ["help", "quit"],
@@ -254,9 +263,11 @@ class AnalystShell(cmd.Cmd):
         schema_dict = analyzer.build_schema_dict(df)
         self.project.schema = schema_dict
 
-        # Invalidate stale KGs and cached framework
+        # Invalidate stale KGs, priorities, cached framework
         self.project.structural_kg = {"nodes": [], "edges": []}
         self.project.diagnostic_kg = {"chains": [], "dimensions_affecting": {}, "hypotheses": []}
+        self.project.priorities = []
+        self.project.briefing_cache = {}
         self._reasoning_framework = ""
 
         print("Schema: " + ", ".join(c["name"] for c in schema_dict.get("columns", [])))
@@ -330,7 +341,27 @@ class AnalystShell(cmd.Cmd):
         )
         self.project.reasoning_framework = self._reasoning_framework
         self.project.save()
-        print("Initialization complete. Ready for analysis.")
+
+        # Proactive: identify strategic priorities
+        print("\n  Identifying strategic priorities...", end="", flush=True)
+        try:
+            priorities = analyzer.identify_priorities(schema_str, self.project.structural_kg, self.project.diagnostic_kg)
+            if priorities:
+                self.project.priorities = priorities
+                self.project.save()
+                print(" done")
+                print(f"\n  Strategic Priorities identified:")
+                for i, p in enumerate(priorities, 1):
+                    print(f"    {i}. {p.get('name', '?')} — {p.get('description', '')}")
+                yn = input("\n  Generate strategic briefing based on these priorities? (Y/n): ").strip().lower()
+                if yn != "n":
+                    self.do_briefing("")
+            else:
+                print(" skipped (empty result)")
+        except Exception as e:
+            print(f" skipped ({e})")
+
+        print("\nInitialization complete. Ready for analysis.")
 
     def do_view(self, arg):
         """view schema|entities|metrics|relationships|chains|hypotheses|data"""
@@ -418,6 +449,269 @@ class AnalystShell(cmd.Cmd):
         else:
             print(f"Unknown view: {sub}")
 
+    def do_priorities(self, arg):
+        """priorities [regenerate|analyze|show] — Strategic priorities for this dataset
+
+    Subcommands:
+      priorities                           Show all priorities
+      priorities regenerate                Re-identify priorities from schema + KGs
+      priorities analyze <n>               Run full analysis on priority #n
+      priorities show <n>                  Show saved analysis for priority #n
+        """
+        parts = arg.strip().split(maxsplit=1)
+        sub = parts[0].lower() if parts else "list"
+
+        # ----
+        # regenerate
+        # ----
+        if sub == "regenerate":
+            if not self._require_data() or not self.project.has_structural_kg():
+                return
+            schema_str = analyzer.extract_schema(self.df)
+            print("  Regenerating strategic priorities...", end="", flush=True)
+            try:
+                priorities = analyzer.identify_priorities(schema_str, self.project.structural_kg, self.project.diagnostic_kg)
+                if priorities:
+                    self.project.priorities = priorities
+                    self.project.save()
+                    print(" done")
+                else:
+                    print(" skipped (empty result)")
+            except Exception as e:
+                print(f" failed: {e}")
+            return
+
+        # ----
+        # analyze <n>
+        # ----
+        if sub == "analyze":
+            if not self._require_data():
+                return
+            if not self.project.has_structural_kg():
+                print("  Knowledge graphs not built. Run 'init' first.")
+                return
+            if not self.project.priorities:
+                print("  No priorities defined. Use 'priorities regenerate' first.")
+                return
+            if len(parts) < 2:
+                print("  Usage: priorities analyze <number>")
+                print(f"  Priorities available: 1-{len(self.project.priorities)}")
+                return
+            try:
+                idx = int(parts[1]) - 1
+                if idx < 0 or idx >= len(self.project.priorities):
+                    print(f"  Invalid index. Use a number 1-{len(self.project.priorities)}.")
+                    return
+            except ValueError:
+                print(f"  Usage: priorities analyze <number>")
+                return
+
+            pri = self.project.priorities[idx]
+            pname = pri.get("name", f"priority-{idx+1}")
+            question = (
+                f"Strategic analysis: {pri.get('description', pname)}. "
+                f"Focus areas: {pri.get('focus_areas', '')}. "
+                f"Key metrics to examine: {', '.join(pri.get('key_metrics', []))}."
+            ).strip()
+
+            slug = _unique_slug(f"_priority-{_make_slug(pname)}", self._existing_analyses())
+            analysis_dir = self.project.analyses_dir / slug
+            analysis_dir.mkdir(parents=True, exist_ok=True)
+
+            schema_str = analyzer.extract_schema(self.df)
+            print(f"\n  Running analysis on priority [{pname}]...\n")
+
+            try:
+                answer = analyzer.agentic_answer(
+                    question=question,
+                    df=self.df,
+                    schema=schema_str,
+                    structural_kg=self.project.structural_kg,
+                    diagnostic_kg=self.project.diagnostic_kg,
+                    reasoning_framework=self._reasoning_framework,
+                    context=None,
+                    custom_instructions=self.project.custom_instructions,
+                )
+            except KeyboardInterrupt:
+                self.project.save()
+                print("\n  Analysis interrupted.")
+                return
+
+            now = datetime.now().isoformat(timespec="seconds")
+            append_jsonl(analysis_dir / "turns.jsonl", {"timestamp": now, "question": question, "summary": answer})
+
+            pri["analysis_summary"] = answer[:300]
+            pri["analysis_slug"] = slug
+            self.project.save()
+
+            print(f"\n  Priority [{pname}] analysis complete.")
+            print(f"  Saved as '{slug}'. Use 'priorities show {idx+1}' or 'review {slug}' for details.\n")
+            return
+
+        # ----
+        # show <n>
+        # ----
+        if sub == "show":
+            if not self.project.priorities:
+                print("  No priorities defined.")
+                return
+            if len(parts) < 2:
+                print("  Usage: priorities show <number>")
+                return
+            try:
+                idx = int(parts[1]) - 1
+                if idx < 0 or idx >= len(self.project.priorities):
+                    print(f"  Invalid index. Use a number 1-{len(self.project.priorities)}.")
+                    return
+            except ValueError:
+                print(f"  Usage: priorities show <number>")
+                return
+
+            pri = self.project.priorities[idx]
+            pname = pri.get("name", f"priority-{idx+1}")
+            summary = pri.get("analysis_summary", "")
+            slug = pri.get("analysis_slug", "")
+
+            print(f"\n  Priority: {pname}")
+            print(f"  {pri.get('description', '')}")
+
+            if summary:
+                print(f"\n  Analysis summary:")
+                print(f"    {summary}")
+                print(f"\n  Use 'review {slug}' for the full analysis.")
+            else:
+                print(f"\n  Not yet analyzed. Use 'priorities analyze {idx+1}' to run analysis.")
+            return
+
+        # ----
+        # list (default)
+        # ----
+        p = self.project
+        if not p.priorities:
+            if p.has_structural_kg():
+                print("  No priorities defined. Use 'priorities regenerate' to generate them.")
+            else:
+                print("  No priorities. Load data and run 'init' first.")
+            return
+
+        print(f"\n  Strategic Priorities for {p.name}:")
+        for i, pri in enumerate(p.priorities, 1):
+            name = pri.get("name", "?")
+            desc = pri.get("description", "")
+            metrics = ", ".join(pri.get("key_metrics", []))
+            focus = pri.get("focus_areas", "")
+            analyzed = pri.get("analysis_summary", "")
+            print(f"\n  {i}. {name}")
+            if desc:
+                print(f"     {desc}")
+            if metrics:
+                print(f"     Key metrics: {metrics}")
+            if focus:
+                print(f"     Focus: {focus}")
+            if analyzed:
+                slug_link = pri.get("analysis_slug", "?")
+                print(f'     \u2192 \u2713 Analyzed (use "priorities show {i}" or "review {slug_link}")')
+            else:
+                print(f"     \u2192 Not yet analyzed (use 'priorities analyze {i}')")
+        print()
+
+    def do_briefing(self, arg):
+        """briefing [regenerate] — Show strategic briefing per priority"""
+        if arg.strip().lower() == "regenerate":
+            if not self._require_data() or not self.project.has_structural_kg():
+                return
+            if not self.project.priorities:
+                print("  No priorities defined. Run 'priorities regenerate' first.")
+                return
+            schema_str = analyzer.extract_schema(self.df)
+            print("  Generating strategic briefing...", end="", flush=True)
+            try:
+                briefing = analyzer.generate_briefing(schema_str, self.project.structural_kg, self.project.diagnostic_kg, self.project.priorities)
+                self.project.briefing_cache = briefing
+                self.project.save()
+                print(" done")
+            except Exception as e:
+                print(f" failed: {e}")
+                return
+        else:
+            briefing = self.project.briefing_cache
+            if not briefing:
+                print("  No cached briefing. Use 'briefing regenerate' to generate one.")
+                return
+
+        insights = briefing.get("priority_insights", []) if isinstance(briefing, dict) else []
+        questions = briefing.get("suggested_questions", []) if isinstance(briefing, dict) else []
+
+        if insights:
+            print("\n  Strategic Briefing:")
+            for item in insights:
+                pname = item.get("priority", "")
+                insight = item.get("insight", "")
+                print(f"\n  [{pname}]")
+                print(f"    {insight}")
+        if questions:
+            print("\n  Suggested starting questions:")
+            for q in questions:
+                print(f"    • {q}")
+        print()
+
+    def do_instructions(self, arg):
+        """instructions [add|remove|clear] — Manage custom analysis instructions"""
+        parts = arg.strip().split(maxsplit=1)
+        cmd = parts[0].lower() if parts else "list"
+
+        if cmd == "list" or not arg.strip():
+            if not self.project.custom_instructions:
+                print("  No custom instructions saved.")
+                print("  Use 'instructions add \"your instruction\"' to add one.")
+                return
+            print(f"\n  Custom Instructions ({len(self.project.custom_instructions)}):")
+            for i, instr in enumerate(self.project.custom_instructions, 1):
+                print(f"  {i}. {instr}")
+            print()
+
+        elif cmd == "add":
+            if len(parts) < 2:
+                print("Usage: instructions add \"your instruction text\"")
+                return
+            instr = parts[1].strip().strip("\"'")
+            if not instr:
+                print("  Instruction cannot be empty.")
+                return
+            self.project.custom_instructions.append(instr)
+            self.project.save()
+            print(f"  Added instruction {len(self.project.custom_instructions)}: {instr[:80]}{'...' if len(instr) > 80 else ''}")
+
+        elif cmd == "remove":
+            if len(parts) < 2:
+                print("Usage: instructions remove <number>")
+                return
+            try:
+                idx = int(parts[1]) - 1
+                if idx < 0 or idx >= len(self.project.custom_instructions):
+                    print(f"  Invalid index. Use 'instructions' to see the list.")
+                    return
+                removed = self.project.custom_instructions.pop(idx)
+                self.project.save()
+                print(f"  Removed instruction: {removed[:80]}{'...' if len(removed) > 80 else ''}")
+            except ValueError:
+                print("  Usage: instructions remove <number>")
+
+        elif cmd == "clear":
+            if not self.project.custom_instructions:
+                print("  No instructions to clear.")
+                return
+            yn = input("  Clear all custom instructions? (y/N): ").strip().lower()
+            if yn == "y":
+                self.project.custom_instructions.clear()
+                self.project.save()
+                print("  All custom instructions cleared.")
+            else:
+                print("  Cancelled.")
+
+        else:
+            print("  Usage: instructions [add \"...\" | remove <n> | clear]")
+
     def do_analyze(self, arg):
         """analyze <question> — Start a new analysis"""
         if not arg.strip():
@@ -463,6 +757,7 @@ class AnalystShell(cmd.Cmd):
                 diagnostic_kg=self.project.diagnostic_kg,
                 reasoning_framework=self._reasoning_framework,
                 context=None,
+                custom_instructions=self.project.custom_instructions,
             )
         except KeyboardInterrupt:
             self.project.save()
@@ -475,6 +770,8 @@ class AnalystShell(cmd.Cmd):
         self.project.save()
 
         print(f"\nAnalyst: {answer}\n")
+        if self.project.priorities:
+            print("  Suggestions: use 'follow \"<question>\"' to dig deeper, or 'priorities' to see strategic areas.")
         print(f"(Saved as analysis '{slug}')")
 
     def do_follow(self, arg):
@@ -536,6 +833,7 @@ class AnalystShell(cmd.Cmd):
                 diagnostic_kg=self.project.diagnostic_kg,
                 reasoning_framework=self._reasoning_framework,
                 context=context,
+                custom_instructions=self.project.custom_instructions,
             )
         except KeyboardInterrupt:
             self.project.save()

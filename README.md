@@ -19,8 +19,11 @@ Without arguments, you get an interactive prompt to create or open a project, th
 ```
 (analyst) load data/sales.csv
 (analyst) init
+(analyst) priorities regenerate           # AI identifies strategic priorities from KGs
+(analyst) priorities analyze 2            # Run full analysis on a priority
 (analyst) analyze "Why did sales decline in Q4?"
 (analyst) follow "What about the Northeast region specifically?"
+(analyst) instructions add "Always compare QoQ and YoY for time-based questions"
 (analyst) analyses
 (analyst) quit
 ```
@@ -34,12 +37,17 @@ Schema extracted (columns, types, samples)
        ↓
 `init` command: LLM builds Structural KG + Diagnostic KG + Reasoning Framework
        ↓
-User asks question (analyze)
+[Proactive] AI identifies strategic business priorities from KGs (priorities)
+       ↓
+[Proactive] AI generates a strategic briefing organized per priority (briefing)
+       ↓
+User asks question (analyze) or runs priority analysis (priorities analyze <n>)
        ↓
 [Phase 1: REASON] LLM thinks using the reasoning framework
   - Selects analysis strategy (trend, comparison, diagnostic, etc.)
   - Considers persona (CFO, Sales Manager, etc.)
   - Decomposes into sub-questions
+  - Respects user custom instructions
        ↓
 [Phase 2: PLAN] LLM creates 3-5 step execution plan
        ↓
@@ -59,17 +67,23 @@ User can follow up with more questions (previous Q/Summary in context)
 ```
 projects/
 └── my-project/
-    ├── analyst.json            # Project metadata
+    ├── analyst.json                    # Project metadata
     ├── data/
-    │   └── sales.csv           # Copy of loaded dataset
+    │   └── sales.csv                   # Copy of loaded dataset
     ├── graphs/
-    │   ├── structural.json     # Structural Knowledge Graph
-    │   └── diagnostic.json     # Diagnostic Knowledge Graph
+    │   ├── structural.json             # Structural Knowledge Graph
+    │   └── diagnostic.json             # Diagnostic Knowledge Graph
     ├── metadata/
-    │   └── schema.json         # Column info, types, samples
+    │   ├── schema.json                 # Column info, types, samples
+    │   ├── reasoning_framework.json    # Dataset-specific reasoning context
+    │   ├── priorities.json             # Strategic business priorities
+    │   ├── custom_instructions.json    # User-defined analysis methodology
+    │   └── briefing.json               # Cached strategic briefing
     └── analyses/
-        └── sales-decline/      # Auto-slugged from question
-            └── turns.jsonl     # {"question": "...", "summary": "..."}
+        ├── sales-decline/              # Auto-slugged from question
+        │   └── turns.jsonl             # {"question": "...", "summary": "..."}
+        └── _priority-profitability/    # Priority-linked analysis (prefixed with _)
+            └── turns.jsonl
 ```
 
 All projects live under a `projects/` folder. Everything is JSON — no database needed.
@@ -80,7 +94,16 @@ All projects live under a `projects/` folder. Everything is JSON — no database
 |---------|-------------|
 | `status` | Show project state (data loaded? graphs built?) |
 | `load <path>` | Load a CSV file, detect schema |
-| `init` | Build schema + structural KG + diagnostic KG in one step (LLM calls) |
+| `init` | Build KGs + reasoning framework + auto-identify priorities |
+| `priorities` | Show strategic business priorities |
+| `priorities regenerate` | Re-identify priorities from schema + KGs |
+| `priorities analyze <n>` | Run full 4-phase analysis on a priority |
+| `priorities show <n>` | Show saved analysis for a priority |
+| `briefing [regenerate]` | Show strategic briefing organized per priority |
+| `instructions` | List custom analysis instructions |
+| `instructions add "..."` | Add a methodology rule (saved per project) |
+| `instructions remove <n>` | Remove an instruction by number |
+| `instructions clear` | Remove all custom instructions |
 | `view schema` | List columns with types and samples (local) |
 | `view entities` | List entity nodes from SKG (local) |
 | `view metrics` | List measure nodes from SKG (local) |
@@ -123,7 +146,9 @@ Jul25/
 │   ├── reasoning_prompt.md           # Phase 1 reasoning prompt template
 │   ├── structural_kg_prompt.md       # Structural KG creation prompt
 │   ├── diagnostic_kg_prompt.md       # Diagnostic KG creation prompt
-│   └── reasoning_context_prompt.md   # Dataset-specific context prompt
+│   ├── reasoning_context_prompt.md   # Dataset-specific context prompt
+│   ├── priorities_prompt.md          # Strategic priority extraction prompt
+│   └── briefing_prompt.md            # Per-priority strategic briefing prompt
 ├── requirements.txt                  # Dependencies
 └── Idea.txt                          # Original project idea
 ```
@@ -175,6 +200,8 @@ This enables iteration on prompts without code changes.
 | `diagnostic_kg_prompt.md` | Diagnostic Knowledge Graph creation |
 | `reasoning_context_prompt.md` | Dataset-specific reasoning context |
 | `reasoning_framework.md` | Analysis strategies, personas, heuristics |
+| `priorities_prompt.md` | Strategic business priority extraction |
+| `briefing_prompt.md` | Per-priority strategic briefing generation |
 
 ### Strategy Extraction
 After Phase 1 selects a strategy (e.g., "Diagnostic Analysis"), only that strategy's section is extracted from the framework and injected into Phase 3 — no redundant context.
@@ -208,6 +235,41 @@ At startup, the LLM generates:
 - Dataset intent and purpose
 - Key analysis focus areas
 - Typical questions users would ask
+
+## Strategic Priorities
+
+After building KGs via `init`, the AI automatically identifies 3-5 key business priorities for the dataset (e.g., Revenue Growth, Profitability, Customer Segments). These are derived from the schema, entities, measures, and causal chains in the knowledge graphs.
+
+**Commands:**
+| Command | What it does |
+|---------|-------------|
+| `priorities` | List priorities with descriptions, key metrics, and analysis status |
+| `priorities regenerate` | Re-run AI identification from schema + KGs |
+| `priorities analyze <n>` | Run the full 4-phase pipeline on a priority — generates real findings with code execution, saves the result linked to that priority |
+| `priorities show <n>` | Display saved analysis summary for a priority |
+
+Priorities can be analyzed on-demand. Each priority analysis runs through the same 4-phase pipeline as a user question, auto-constructing a question from the priority's description and key metrics. Results are saved as analysis turns under `analyses/_priority-<name>/` and linked back to the priority.
+
+After analysis, `priorities` shows a `✓ Analyzed` marker. Use `review <slug>` for the full turn history.
+
+## Custom Analysis Instructions
+
+Users can save persistent methodology rules that inject into every `analyze`/`follow` turn. This controls *how* the AI approaches questions.
+
+**Example instructions:**
+- *"For datasets with >12 months, always start with the most recent quarter and compare QoQ and YoY."*
+- *"When analyzing profitability, always report gross margin and net margin separately."*
+- *"If a question is ambiguous, ask clarifying questions before running code."*
+
+**Commands:**
+| Command | Description |
+|---------|-------------|
+| `instructions` | List all saved instructions |
+| `instructions add "..."` | Add a new instruction |
+| `instructions remove <n>` | Remove by number |
+| `instructions clear` | Clear all instructions |
+
+Instructions are saved per project in `metadata/custom_instructions.json` and injected into both Phase 1 (reasoning prompt) and Phase 3 (execution system prompt) of every analysis.
 
 ## LLM Reliability
 
@@ -298,6 +360,12 @@ CONFIG.temperature_json       # JSON generation (0.1)
 CONFIG.temperature_code       # Code generation (0.2)
 CONFIG.temperature_synthesis  # Final answer synthesis (0.4)
 ```
+
+## What's New
+
+- [x] **Strategic Priorities** — AI identifies key business priorities from KGs; run full analysis per priority
+- [x] **Custom Analysis Instructions** — Persistent user-defined methodology rules injected into every analysis
+- [x] **Strategic Briefing** — Per-priority strategic overview generated from schema + KGs
 
 ## Future Plans
 

@@ -12,6 +12,8 @@ STRUCTURAL KNOWLEDGE GRAPH:
 DIAGNOSTIC KNOWLEDGE GRAPH:
 {diagnostic_kg}
 
+{custom_instructions}
+
 QUESTION: {question}
 
 {context_section}

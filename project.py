@@ -26,6 +26,9 @@ class Project:
     diagnostic_kg: dict = field(default_factory=lambda: {"chains": [], "dimensions_affecting": {}, "hypotheses": []})
     current_analysis: Optional[str] = None
     reasoning_framework: str = ""
+    priorities: list = field(default_factory=list)
+    custom_instructions: list[str] = field(default_factory=list)
+    briefing_cache: dict = field(default_factory=dict)
 
     @property
     def data_dir(self) -> Path:
@@ -52,6 +55,9 @@ class Project:
         save_json(self.graphs_dir / "diagnostic.json", self.diagnostic_kg)
         save_json(self.metadata_dir / "schema.json", self.schema)
         save_json(self.metadata_dir / "reasoning_framework.json", {"text": self.reasoning_framework})
+        save_json(self.metadata_dir / "priorities.json", self.priorities)
+        save_json(self.metadata_dir / "custom_instructions.json", self.custom_instructions)
+        save_json(self.metadata_dir / "briefing.json", self.briefing_cache)
 
         meta = {
             "name": self.name,
@@ -78,6 +84,9 @@ class Project:
         self.diagnostic_kg = load_json(self.graphs_dir / "diagnostic.json",
                                        {"chains": [], "dimensions_affecting": {}, "hypotheses": []})
         self.reasoning_framework = load_json(self.metadata_dir / "reasoning_framework.json", {}).get("text", "")
+        self.priorities = load_json(self.metadata_dir / "priorities.json", [])
+        self.custom_instructions = load_json(self.metadata_dir / "custom_instructions.json", [])
+        self.briefing_cache = load_json(self.metadata_dir / "briefing.json", {})
 
     def is_data_loaded(self) -> bool:
         return bool(self.data_path and self.data_path.exists())
