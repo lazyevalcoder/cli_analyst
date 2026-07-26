@@ -1,4 +1,6 @@
 import json
+import re
+import time
 from pathlib import Path
 
 import pandas as pd
@@ -104,7 +106,8 @@ def build_structural_kg(schema: str) -> dict:
     raw = llm_client.ask_json(prompt, system_context="You are a data architect. Return only valid JSON.")
     validated = _validate_structural_kg(raw)
     if not validated["nodes"] and not validated["edges"]:
-        print("  Warning: LLM returned invalid structural KG, using fallback")
+        print("  ! LLM returned an empty or invalid structural KG. Expected nodes/edges describing the schema.")
+        print("    Proceeding with an empty graph. `init` will continue but analysis quality will suffer.")
         return {"nodes": [], "edges": []}
     return validated
 
@@ -114,7 +117,8 @@ def build_diagnostic_kg(structural_kg: dict) -> dict:
     raw = llm_client.ask_json(prompt, system_context="You are a business analyst. Return only valid JSON.")
     validated = _validate_diagnostic_kg(raw)
     if not validated.get("chains") and not validated.get("hypotheses"):
-        print("  Warning: LLM returned invalid diagnostic KG, using fallback")
+        print("  ! LLM returned an empty or invalid diagnostic KG. Expected causal chains and hypotheses.")
+        print("    Proceeding with an empty graph. `analyze` will have less guidance for root-cause analysis.")
         return {"chains": [], "dimensions_affecting": {}, "hypotheses": []}
     return validated
 
@@ -248,6 +252,30 @@ def get_full_reasoning_framework(schema: str, structural_kg: dict, diagnostic_kg
 # =============================================================
 
 def reason_and_plan(question: str, schema: str, structural_kg: dict, diagnostic_kg: dict, reasoning_framework: str, context: list[dict] = None) -> tuple:
+    # Fast-path for follow-ups: skip reasoning for simple drill-down questions
+    if context:
+        clean_question = re.sub(r"[^a-z0-9 ]", "", question.lower()).strip()
+        fast_keywords = [
+            "what about", "how about", "and what", "also what", "specifically",
+            "tell me more", "elaborate", "go deeper", "dig into",
+        ]
+        is_drill_down = any(clean_question.startswith(kw) for kw in fast_keywords)
+        is_short_simple = len(clean_question.split()) <= 8 and not clean_question.startswith("why")
+        if is_drill_down or is_short_simple:
+            last_turn = context[-1]
+            reasoning = (
+                f"Fast follow-up on: \"{last_turn.get('question', '')}\"\n"
+                f"New question: {question}\n"
+                "Proceeding directly to execution with prior context."
+            )
+            plan = [
+                "Review previous analysis context for relevant findings",
+                "Run code to answer the follow-up question",
+                "Summarize new findings in context of prior analysis",
+            ]
+            print("  [Phase 1] Quick follow-up (skipping reasoning phase)...", flush=True)
+            return reasoning, plan, "", ""
+
     context_section = ""
     if context:
         lines = ["", "PREVIOUS ANALYSIS CONTEXT (this is a follow-up question):"]
@@ -382,12 +410,17 @@ Begin your analysis. Execute the first step of your plan."""
     analysis_state = []
     _tool_choice = "required"
     _text_only_strikes = 0
+    _loop_start = time.time()
 
     # Persistent namespace — df is shared across steps
     _ns = sandbox._make_namespace(df)
 
     for iteration in range(CONFIG.max_iterations):
-        print(f"  [Step {iteration + 1}/{CONFIG.max_iterations}] Thinking...", flush=True)
+        _step_start = time.time()
+        total_elapsed = _step_start - _loop_start
+        avg = total_elapsed / (iteration + 1)
+        remaining = avg * (CONFIG.max_iterations - iteration - 1)
+        print(f"  [Step {iteration + 1}/{CONFIG.max_iterations}] ({total_elapsed:.0f}s elapsed, ~{remaining:.0f}s remain) Thinking...", flush=True)
 
         state_summary = build_step_summary(analysis_state)
         if state_summary:
@@ -428,7 +461,8 @@ Begin your analysis. Execute the first step of your plan."""
                     df_before = _ns["df"].copy(deep=True)
 
                     success, output = sandbox.execute_in_namespace(code, _ns)
-                    print(f"  [Step {iteration + 1}] {'OK' if success else 'ERROR'}: {output[:500]}")
+                    step_dur = time.time() - _step_start
+                    print(f"  [Step {iteration + 1}] {'OK' if success else 'ERROR'} ({step_dur:.1f}s): {output[:500]}")
 
                     analysis_state.append({"step": iteration + 1, "success": success, "output": output})
 

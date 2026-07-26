@@ -2,6 +2,8 @@ import cmd
 import re
 import shlex
 import shutil
+import time
+from datetime import datetime
 from pathlib import Path
 
 import analyzer
@@ -29,6 +31,9 @@ def _unique_slug(base: str, existing: set) -> str:
 def _show_turns(turns, max_chars=300):
     for i, t in enumerate(turns, 1):
         print(f"\n  --- Turn {i} ---")
+        ts = t.get("timestamp", "")
+        if ts:
+            print(f"  [{ts}]")
         print(f"  Q: {t.get('question', '')}")
         summary = t.get('summary', '')
         truncated = len(summary) > max_chars
@@ -48,14 +53,26 @@ class AnalystShell(cmd.Cmd):
         self._check_llm()
         self._print_welcome()
 
+    def onecmd(self, line):
+        try:
+            return super().onecmd(line)
+        except KeyboardInterrupt:
+            print("\n(Interrupted)")
+            return False
+        except Exception as e:
+            print(f"\nError: {e}")
+            return False
+
     def _print_welcome(self):
         p = self.project
+        analyses = self._existing_analyses()
+
         print(f"\nProject: {p.name}")
         if p.is_data_loaded():
             loaded = "loaded" if self.df is not None else "file present"
             print(f"  Data: {p.data_path.name} ({loaded})")
-        analyses = self._existing_analyses()
         print(f"  Analyses: {len(analyses)}")
+
         if p.current_analysis:
             analysis_dir = p.analyses_dir / p.current_analysis
             turns = read_jsonl(analysis_dir / "turns.jsonl") if analysis_dir.exists() else []
@@ -64,9 +81,16 @@ class AnalystShell(cmd.Cmd):
             print(f"  Current: {p.current_analysis} ({n} turn{'s' if n != 1 else ''})")
             if first_q:
                 print(f"    Latest Q: {first_q[:80]}")
+
+        # Contextual next-step hints
+        if not p.is_data_loaded():
+            print("  Next: use 'load <path>' to import a CSV file.")
+        elif not p.has_structural_kg():
+            print("  Next: use 'init' to build knowledge graphs.")
+        elif p.current_analysis:
             print("  Use 'follow <question>' to continue this analysis.")
-            print("  Use 'analyze <question>' to start a new analysis instead.")
-        elif self.df is not None:
+            print("  Use 'analyze <question>' to start a new analysis.")
+        else:
             print("  Use 'analyze <question>' to start an analysis.")
 
     def _check_llm(self):
@@ -113,10 +137,24 @@ class AnalystShell(cmd.Cmd):
     # =========================================================
 
     def do_status(self, arg):
-        """Show project status"""
+        """status [llm] — Show project status (or LLM health check)"""
+        sub = arg.strip().lower()
+
+        if sub == "llm":
+            ok = llm_client.check_availability()
+            if ok:
+                print("  LLM: available")
+            else:
+                print(f"  LLM: NOT available at {CONFIG.base_url}")
+            return
+
         p = self.project
         print(f"Project: {p.name}")
         print(f"  Root: {p.root.resolve()}")
+        if p.created_at:
+            print(f"  Created: {p.created_at}")
+        if p.updated_at:
+            print(f"  Updated: {p.updated_at}")
 
         if p.is_data_loaded():
             loaded = "[x]" if self.df is not None else "(file present)"
@@ -134,10 +172,47 @@ class AnalystShell(cmd.Cmd):
         dkg_h = len(p.diagnostic_kg.get("hypotheses", []))
         print(f"  Diagnostic KG: {'[x]' if p.has_diagnostic_kg() else '-'} ({dkg_c} chains, {dkg_h} hypotheses)")
 
+        fw_avail = "[x]" if bool(p.reasoning_framework) else "-"
+        fw_cached = "(disk)" if (p.metadata_dir / "reasoning_framework.json").exists() else ""
+        print(f"  Framework: {fw_avail} {fw_cached}")
+
         analyses = self._existing_analyses()
         print(f"  Analyses: {len(analyses)}")
         if p.current_analysis:
             print(f"  Current: {p.current_analysis}")
+
+    def do_welcome(self, arg):
+        """welcome — Show welcome screen and next-step hints"""
+        self._print_welcome()
+
+    def do_help(self, arg):
+        """help [<command>] — Show help (categorized by default)"""
+        if arg.strip():
+            super().do_help(arg)
+            return
+
+        categories = {
+            "Setup":    ["load", "init", "rename"],
+            "Knowledge": ["status", "view", "welcome"],
+            "Analysis":  ["analyze", "follow"],
+            "Review":    ["review", "analyses", "list", "export"],
+            "Manage":    ["delete"],
+            "Shell":     ["help", "quit"],
+        }
+
+        docstrings = {}
+        for name in sorted(self.get_names()):
+            if name[:3] == "do_":
+                docstrings[name[3:]] = getattr(self, name).__doc__
+
+        for cat, cmds in categories.items():
+            print(f"\n  {cat}:")
+            for cmd in cmds:
+                doc = docstrings.get(cmd, "")
+                if doc:
+                    short = doc.split(" — ", 1)[-1].split("\n")[0]
+                    print(f"    {cmd:12s} {short}")
+            print()
 
     def do_load(self, arg):
         """load <path> — Load a CSV file into the project"""
@@ -149,11 +224,22 @@ class AnalystShell(cmd.Cmd):
             print(f"File not found: {path}")
             return
 
+        if self.project.is_data_loaded():
+            yn = input("Data already loaded. New data will invalidate existing KGs. Continue? (y/N): ").strip().lower()
+            if yn != "y":
+                print("Cancelled.")
+                return
+
+        suffix = path.suffix.lower()
+        if suffix not in (".csv", ".tsv", ".txt"):
+            print(f"Unsupported format: '{suffix}'. Only CSV files are supported.")
+            return
+
         print(f"Loading {path.name}...", end="", flush=True)
         try:
             df = analyzer.load_csv(str(path))
         except Exception as e:
-            print(f" error: {e}")
+            print(f" failed: {e}")
             return
         print(f" {len(df)} rows, {len(df.columns)} columns")
 
@@ -168,8 +254,14 @@ class AnalystShell(cmd.Cmd):
         schema_dict = analyzer.build_schema_dict(df)
         self.project.schema = schema_dict
 
+        # Invalidate stale KGs and cached framework
+        self.project.structural_kg = {"nodes": [], "edges": []}
+        self.project.diagnostic_kg = {"chains": [], "dimensions_affecting": {}, "hypotheses": []}
+        self._reasoning_framework = ""
+
         print("Schema: " + ", ".join(c["name"] for c in schema_dict.get("columns", [])))
         self.project.save()
+        print("Use 'init' to build knowledge graphs.")
 
     def do_init(self, arg):
         """init — Build schema + structural KG + diagnostic KG in one step"""
@@ -187,17 +279,23 @@ class AnalystShell(cmd.Cmd):
         if self.project.has_structural_kg():
             yn = input("Structural KG already exists. Rebuild? (y/N): ").strip().lower()
             if yn != "y":
-                print("Skipping SKG.")
+                print("  Skipping SKG.")
             else:
-                print("Building structural KG (LLM call)...", flush=True)
+                t0 = time.time()
+                print("  Building structural KG...", end="", flush=True)
                 kg = analyzer.build_structural_kg(schema_str)
+                elapsed = time.time() - t0
+                print(f" done ({elapsed:.1f}s)")
+                print(f"  {len(kg.get('nodes', []))} nodes, {len(kg.get('edges', []))} edges")
                 self.project.structural_kg = kg
-                print(f"Done: {len(kg.get('nodes', []))} nodes, {len(kg.get('edges', []))} edges")
         else:
-            print("Building structural KG (LLM call)...", flush=True)
+            t0 = time.time()
+            print("  Building structural KG...", end="", flush=True)
             kg = analyzer.build_structural_kg(schema_str)
+            elapsed = time.time() - t0
+            print(f" done ({elapsed:.1f}s)")
+            print(f"  {len(kg.get('nodes', []))} nodes, {len(kg.get('edges', []))} edges")
             self.project.structural_kg = kg
-            print(f"Done: {len(kg.get('nodes', []))} nodes, {len(kg.get('edges', []))} edges")
 
         if not self.project.has_structural_kg():
             print("Cannot proceed without a structural KG.")
@@ -208,17 +306,23 @@ class AnalystShell(cmd.Cmd):
         if self.project.has_diagnostic_kg():
             yn = input("Diagnostic KG already exists. Rebuild? (y/N): ").strip().lower()
             if yn != "y":
-                print("Skipping DKG.")
+                print("  Skipping DKG.")
             else:
-                print("Building diagnostic KG (LLM call)...", flush=True)
+                t0 = time.time()
+                print("  Building diagnostic KG...", end="", flush=True)
                 kg = analyzer.build_diagnostic_kg(self.project.structural_kg)
+                elapsed = time.time() - t0
+                print(f" done ({elapsed:.1f}s)")
+                print(f"  {len(kg.get('chains', []))} chains, {len(kg.get('hypotheses', []))} hypotheses")
                 self.project.diagnostic_kg = kg
-                print(f"Done: {len(kg.get('chains', []))} chains, {len(kg.get('hypotheses', []))} hypotheses")
         else:
-            print("Building diagnostic KG (LLM call)...", flush=True)
+            t0 = time.time()
+            print("  Building diagnostic KG...", end="", flush=True)
             kg = analyzer.build_diagnostic_kg(self.project.structural_kg)
+            elapsed = time.time() - t0
+            print(f" done ({elapsed:.1f}s)")
+            print(f"  {len(kg.get('chains', []))} chains, {len(kg.get('hypotheses', []))} hypotheses")
             self.project.diagnostic_kg = kg
-            print(f"Done: {len(kg.get('chains', []))} chains, {len(kg.get('hypotheses', []))} hypotheses")
 
         # Reasoning framework (cached to disk — no LLM call on next open)
         self._reasoning_framework = analyzer.get_full_reasoning_framework(
@@ -229,22 +333,39 @@ class AnalystShell(cmd.Cmd):
         print("Initialization complete. Ready for analysis.")
 
     def do_view(self, arg):
-        """view schema|entities|metrics|relationships|chains|hypotheses"""
+        """view schema|entities|metrics|relationships|chains|hypotheses|data"""
         parts = shlex.split(arg)
         if not parts:
-            print("Usage: view schema|entities|metrics|relationships|chains|hypotheses")
+            print("Usage: view schema|entities|metrics|relationships|chains|hypotheses|data")
             return
         sub = parts[0].lower()
+
+        if sub == "data":
+            if self.df is None:
+                print("No data loaded.")
+                return
+            print(self.df.head().to_string())
+            return
 
         if sub == "schema":
             if not self.project.has_schema():
                 print("No schema available. Load data first.")
                 return
-            col: dict
-            for col in self.project.schema.get("columns", []):
-                sample_str = ", ".join(repr(str(s)) for s in col.get("sample", []))
-                print(f"  {col['name']} ({col['dtype']}, {col['kind']}, {col.get('unique', 0)} unique)")
-                print(f"    samples: [{sample_str}]")
+            cols = self.project.schema.get("columns", [])
+            groups = {"numeric": [], "text": [], "datetime": [], "other": []}
+            for c in cols:
+                kind = c.get("kind", "other")
+                groups.setdefault(kind, groups["other"]).append(c)
+            for kind_label in ("numeric", "datetime", "text", "other"):
+                items = groups.get(kind_label, [])
+                if not items:
+                    continue
+                print(f"  [{kind_label.upper()}]")
+                for c in items:
+                    sample_str = ", ".join(repr(str(s)) for s in c.get("sample", []))
+                    print(f"    {c['name']} ({c['dtype']}, {c.get('unique', 0)} unique)")
+                    if sample_str:
+                        print(f"      samples: [{sample_str}]")
 
         elif sub == "entities":
             if not self._require_skg():
@@ -330,19 +451,26 @@ class AnalystShell(cmd.Cmd):
         analysis_dir.mkdir(parents=True, exist_ok=True)
 
         schema_str = analyzer.extract_schema(self.df)
-        print(f"\nStarting analysis: {question}\n")
+        print(f"\nAnalysis slug: {slug}")
+        print(f"Question: {question}\n")
 
-        answer = analyzer.agentic_answer(
-            question=question,
-            df=self.df,
-            schema=schema_str,
-            structural_kg=self.project.structural_kg,
-            diagnostic_kg=self.project.diagnostic_kg,
-            reasoning_framework=self._reasoning_framework,
-            context=None,
-        )
+        try:
+            answer = analyzer.agentic_answer(
+                question=question,
+                df=self.df,
+                schema=schema_str,
+                structural_kg=self.project.structural_kg,
+                diagnostic_kg=self.project.diagnostic_kg,
+                reasoning_framework=self._reasoning_framework,
+                context=None,
+            )
+        except KeyboardInterrupt:
+            self.project.save()
+            print("\nAnalysis interrupted. Partial project state saved.")
+            return
 
-        append_jsonl(analysis_dir / "turns.jsonl", {"question": question, "summary": answer})
+        now = datetime.now().isoformat(timespec="seconds")
+        append_jsonl(analysis_dir / "turns.jsonl", {"timestamp": now, "question": question, "summary": answer})
         self.project.current_analysis = slug
         self.project.save()
 
@@ -399,19 +527,25 @@ class AnalystShell(cmd.Cmd):
 
         print()
 
-        answer = analyzer.agentic_answer(
-            question=question,
-            df=self.df,
-            schema=schema_str,
-            structural_kg=self.project.structural_kg,
-            diagnostic_kg=self.project.diagnostic_kg,
-            reasoning_framework=self._reasoning_framework,
-            context=context,
-        )
+        try:
+            answer = analyzer.agentic_answer(
+                question=question,
+                df=self.df,
+                schema=schema_str,
+                structural_kg=self.project.structural_kg,
+                diagnostic_kg=self.project.diagnostic_kg,
+                reasoning_framework=self._reasoning_framework,
+                context=context,
+            )
+        except KeyboardInterrupt:
+            self.project.save()
+            print("\nAnalysis interrupted. Partial project state saved.")
+            return
 
+        now = datetime.now().isoformat(timespec="seconds")
         append_jsonl(
             self.project.analyses_dir / self.project.current_analysis / "turns.jsonl",
-            {"question": question, "summary": answer},
+            {"timestamp": now, "question": question, "summary": answer},
         )
         self.project.save()
 
@@ -426,10 +560,18 @@ class AnalystShell(cmd.Cmd):
         for slug in sorted(existing):
             turns = read_jsonl(self.project.analyses_dir / slug / "turns.jsonl")
             n = len(turns)
-            first_q = turns[0]["question"][:80] if turns else "(empty)"
+            first_q = turns[0]["question"] if turns else "(empty)"
+            last_q = turns[-1]["question"] if turns and len(turns) > 1 else None
+            start_ts = turns[0].get("timestamp", "") if turns else ""
             marker = " ← current" if slug == self.project.current_analysis else ""
             print(f"  {slug}{marker}")
-            print(f"    {n} turn(s) | {first_q}")
+            ts_str = f" [{start_ts}]" if start_ts else ""
+            if last_q:
+                print(f"    {n} turn(s){ts_str}")
+                print(f"    First: {first_q[:80]}{'...' if len(first_q) > 80 else ''}")
+                print(f"    Latest: {last_q[:120]}{'...' if len(last_q) > 120 else ''}")
+            else:
+                print(f"    {n} turn(s){ts_str} | {first_q[:120]}{'...' if len(first_q) > 120 else ''}")
 
     def do_review(self, arg):
         """review [<slug>] — Show analysis turns (defaults to current)"""
@@ -449,9 +591,100 @@ class AnalystShell(cmd.Cmd):
             return
         _show_turns(turns, max_chars=500)
 
+    def do_rename(self, arg):
+        """rename <new-name> — Rename the current project"""
+        name = arg.strip()
+        if not name:
+            print("Usage: rename <new-name>")
+            return
+        if "/" in name or "\\" in name or not name.isprintable():
+            print("Invalid project name.")
+            return
+        old_root = self.project.root
+        new_root = old_root.parent / name
+        if new_root.exists():
+            print(f"Project '{name}' already exists.")
+            return
+        old_root.rename(str(new_root))
+        self.project.name = name
+        self.project.root = new_root
+        self.project.save()
+        print(f"Project renamed to '{name}'.")
+
     def do_list(self, arg):
         """list — List saved analyses (alias for analyses)"""
         self.do_analyses(arg)
+
+    def do_delete(self, arg):
+        """delete project <name>|analysis <slug> — Delete a project or analysis"""
+        parts = shlex.split(arg)
+        if len(parts) < 2:
+            print("Usage: delete project <name>")
+            print("       delete analysis <slug>")
+            return
+        kind, name = parts[0].lower(), parts[1]
+
+        if kind == "project":
+            root = Path("projects") / name
+            if not root.exists():
+                print(f"Project '{name}' not found.")
+                return
+            yn = input(f"Delete entire project '{name}'? This cannot be undone. (y/N): ").strip().lower()
+            if yn != "y":
+                print("Cancelled.")
+                return
+            shutil.rmtree(root)
+            print(f"Project '{name}' deleted.")
+            return
+
+        if kind == "analysis":
+            if not self.project.current_analysis and name == "current":
+                name = self.project.current_analysis
+            analysis_dir = self.project.analyses_dir / name
+            if not analysis_dir.exists():
+                print(f"Analysis '{name}' not found.")
+                return
+            yn = input(f"Delete analysis '{name}'? (y/N): ").strip().lower()
+            if yn != "y":
+                print("Cancelled.")
+                return
+            shutil.rmtree(analysis_dir)
+            if self.project.current_analysis == name:
+                self.project.current_analysis = None
+            self.project.save()
+            print(f"Analysis '{name}' deleted.")
+            return
+
+        print("Usage: delete project <name> | analysis <slug>")
+
+    def do_export(self, arg):
+        """export [<slug>] — Export analysis turns as markdown (defaults to current)"""
+        slug = arg.strip()
+        if not slug:
+            if not self.project.current_analysis:
+                print("No current analysis. Specify a slug or start an analysis first.")
+                return
+            slug = self.project.current_analysis
+        analysis_dir = self.project.analyses_dir / slug
+        if not analysis_dir.exists():
+            print(f"Analysis '{slug}' not found.")
+            return
+        turns = read_jsonl(analysis_dir / "turns.jsonl")
+        if not turns:
+            print("  (empty)")
+            return
+        lines = [f"# Analysis: {slug}", f"", f"Project: {self.project.name}", f"", "---", ""]
+        for i, t in enumerate(turns, 1):
+            lines.append(f"## Turn {i}")
+            lines.append(f"")
+            lines.append(f"**Question:** {t.get('question', '')}")
+            lines.append(f"")
+            lines.append(t.get("summary", ""))
+            lines.append("")
+        md = "\n".join(lines)
+        dest = analysis_dir / "export.md"
+        dest.write_text(md, encoding="utf-8")
+        print(f"Exported {len(turns)} turn(s) to {dest.resolve()}")
 
     def do_quit(self, arg):
         """quit — Save and exit"""

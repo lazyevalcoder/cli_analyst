@@ -1,4 +1,6 @@
+import json
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
@@ -16,6 +18,8 @@ def _ensure_dir(path: Path) -> None:
 class Project:
     name: str
     root: Path
+    created_at: str = ""
+    updated_at: str = ""
     data_path: Optional[Path] = None
     schema: dict = field(default_factory=dict)
     structural_kg: dict = field(default_factory=lambda: {"nodes": [], "edges": []})
@@ -40,6 +44,10 @@ class Project:
         return self.root / "analyses"
 
     def save(self) -> None:
+        now = datetime.now().isoformat(timespec="seconds")
+        self.updated_at = now
+        if not self.created_at:
+            self.created_at = now
         save_json(self.graphs_dir / "structural.json", self.structural_kg)
         save_json(self.graphs_dir / "diagnostic.json", self.diagnostic_kg)
         save_json(self.metadata_dir / "schema.json", self.schema)
@@ -47,6 +55,8 @@ class Project:
 
         meta = {
             "name": self.name,
+            "created_at": self.created_at,
+            "updated_at": self.updated_at,
             "data_path": str(self.data_path.relative_to(self.root)) if self.data_path else None,
             "current_analysis": self.current_analysis,
         }
@@ -55,6 +65,8 @@ class Project:
     def load(self) -> None:
         meta = load_json(self.root / ANALYST_META, {})
         self.name = meta.get("name", self.name)
+        self.created_at = meta.get("created_at", "")
+        self.updated_at = meta.get("updated_at", "")
         data_rel = meta.get("data_path")
         if data_rel:
             data_candidate = self.root / data_rel

@@ -4,6 +4,7 @@ from pathlib import Path
 
 from project import init_project, open_project, ANALYST_META, PROJECTS_DIR
 from shell import AnalystShell
+from storage import load_json
 
 
 def _scan_projects() -> list[Path]:
@@ -16,13 +17,36 @@ def _scan_projects() -> list[Path]:
     )
 
 
+def _project_summary(root: Path) -> dict:
+    meta = load_json(root / ANALYST_META, {})
+    data_rel = meta.get("data_path", "")
+    data_file = Path(data_rel).name if data_rel else "-"
+
+    schema = load_json(root / "metadata" / "schema.json", {})
+    skg = load_json(root / "graphs" / "structural.json", {})
+    dkg = load_json(root / "graphs" / "diagnostic.json", {})
+
+    analyses_dir = root / "analyses"
+    n_analyses = len([d for d in analyses_dir.iterdir() if d.is_dir()]) if analyses_dir.exists() else 0
+
+    return {
+        "data": data_file,
+        "schema": "[x]" if bool(schema.get("columns")) else "",
+        "skg_n": str(len(skg.get("nodes", []))) if skg.get("nodes") else "",
+        "dkg_c": str(len(dkg.get("chains", []))) if dkg.get("chains") else "",
+        "analyses": str(n_analyses) if n_analyses else "",
+    }
+
+
 def _list_projects(projects: list[Path]) -> None:
-    if projects:
-        print("Available projects:")
-        for i, p in enumerate(projects, 1):
-            print(f"  {i}. {p.name}")
-    else:
-        print("No projects found in the current directory.")
+    if not projects:
+        print("No projects found.")
+        return
+    print(f"  {'#':>2s}  {'Name':20s}  {'Data':22s}  {'Sch':4s}  {'SKGn':5s}  {'DKGc':5s}  {'Anls':4s}")
+    print("  " + "-" * 70)
+    for i, p in enumerate(projects, 1):
+        s = _project_summary(p)
+        print(f"  {i:>2d}  {p.name:20s}  {s['data']:22s}  {s['schema']:>4s}  {s['skg_n']:>5s}  {s['dkg_c']:>5s}  {s['analyses']:>4s}")
 
 
 def _interactive() -> None:
