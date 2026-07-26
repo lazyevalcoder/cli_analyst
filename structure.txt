@@ -1,0 +1,31 @@
+customer-analytics.aproj/
+│
+├── project.yaml              # project metadata
+├── data/
+│   ├── sales.parquet
+│   ├── customers.csv
+│   └── ...
+│
+├── graphs/
+│   ├── structural.graph.json
+│   ├── causal.graph.json
+│   ├── semantic.graph.json      # optional later
+│   └── embeddings.bin           # optional
+│
+├── metadata/
+│   ├── schema.json
+│   ├── profiling.json
+│   ├── statistics.json
+│   └── ontology.json
+│
+├── cache/
+│
+├── analyses/
+│   ├── revenue_drop.analysis.json
+│   └── ...
+│
+├── history/
+│   └── graph_versions/
+│
+└── config/
+    └── settings.yaml
