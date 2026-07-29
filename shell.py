@@ -10,6 +10,7 @@ import analyzer
 import llm_client
 import pandas as pd
 from config import CONFIG
+from metric_catalog import MetricCatalog
 from storage import append_jsonl, read_jsonl, save_json
 
 
@@ -49,6 +50,7 @@ class AnalystShell(cmd.Cmd):
         self.project = project
         self.df = None
         self._reasoning_framework = ""
+        self._catalog = MetricCatalog()
         self._load_state()
         self._check_llm()
         self._print_welcome()
@@ -115,6 +117,9 @@ class AnalystShell(cmd.Cmd):
         # Load cached reasoning framework — no LLM call
         if self.project.reasoning_framework:
             self._reasoning_framework = self.project.reasoning_framework
+
+        # Load metric catalog
+        self._catalog = MetricCatalog.load(self.project.metric_catalog_path)
 
     def _require_data(self) -> bool:
         if self.df is None:
@@ -184,6 +189,13 @@ class AnalystShell(cmd.Cmd):
         print(f"  Framework: {fw_avail} {fw_cached}")
         print(f"  Priorities: {len(p.priorities)} defined" if p.priorities else "  Priorities: -")
         print(f"  Custom instructions: {len(p.custom_instructions)} saved" if p.custom_instructions else "  Custom instructions: -")
+        cat_n = len(self._catalog)
+        if cat_n:
+            kpi_n = len(self._catalog.list("kpi"))
+            sm_n = len(self._catalog.list("supporting_metric"))
+            print(f"  Metric Catalog: {cat_n} ({kpi_n} KPIs, {sm_n} supporting)")
+        else:
+            print(f"  Metric Catalog: -")
 
         analyses = self._existing_analyses()
         print(f"  Analyses: {len(analyses)}")
@@ -202,7 +214,7 @@ class AnalystShell(cmd.Cmd):
 
         categories = {
             "Setup":    ["load", "init", "rename"],
-            "Knowledge": ["status", "view", "welcome", "priorities", "briefing"],
+            "Knowledge": ["status", "view", "welcome", "priorities", "briefing", "metrics", "metric"],
             "Analysis":  ["analyze", "follow", "instructions"],
             "Review":    ["review", "analyses", "list", "export"],
             "Manage":    ["delete"],
@@ -349,6 +361,8 @@ class AnalystShell(cmd.Cmd):
             if priorities:
                 self.project.priorities = priorities
                 self.project.save()
+                self._catalog = MetricCatalog.build_from(priorities)
+                self._catalog.save(self.project.metric_catalog_path)
                 print(" done")
                 print(f"\n  Strategic Priorities identified:")
                 for i, p in enumerate(priorities, 1):
@@ -474,6 +488,8 @@ class AnalystShell(cmd.Cmd):
                 if priorities:
                     self.project.priorities = priorities
                     self.project.save()
+                    self._catalog = MetricCatalog.build_from(priorities)
+                    self._catalog.save(self.project.metric_catalog_path)
                     print(" done")
                 else:
                     print(" skipped (empty result)")
@@ -532,12 +548,12 @@ class AnalystShell(cmd.Cmd):
                     reasoning_framework=self._reasoning_framework,
                     context=None,
                     custom_instructions=self.project.custom_instructions,
+                    catalog=self._catalog,
                 )
             except KeyboardInterrupt:
                 self.project.save()
                 print("\n  Analysis interrupted.")
                 return
-
             now = datetime.now().isoformat(timespec="seconds")
             append_jsonl(analysis_dir / "turns.jsonl", {"timestamp": now, "question": question, "summary": answer})
 
@@ -657,6 +673,99 @@ class AnalystShell(cmd.Cmd):
             else:
                 print(f"     \u2192 Not yet analyzed (use 'priorities analyze {i}')")
         print()
+
+    def do_metrics(self, arg):
+        """metrics [kpis|supporting] — List metric catalog entries"""
+        sub = arg.strip().lower()
+        kind_map = {"kpis": "kpi", "supporting": "supporting_metric"}
+        kind = kind_map.get(sub, None)
+
+        entries = self._catalog.list(kind)
+        if not entries:
+            print("  Metric catalog is empty.")
+            if self.project.priorities:
+                print("  Use 'priorities regenerate' to rebuild.")
+            else:
+                print("  Use 'init' to generate priorities and populate the catalog.")
+            return
+
+        if kind:
+            label = "KPIs" if kind == "kpi" else "Supporting Metrics"
+            print(f"\n  {label} ({len(entries)}):")
+        else:
+            print(f"\n  Metric Catalog ({len(entries)} entries):")
+
+        for e in entries:
+            kind_label = "[KPI]" if e.get("kind") == "kpi" else "[S]"
+            source_mark = " (edited)" if e.get("source") == "user-override" else ""
+            print(f"    {e.get('id', '?')}: {e.get('name', '?')} {kind_label} ({e.get('metric', '?')}){source_mark}")
+            print(f"      Priority: {e.get('priority', '')}")
+        print()
+
+    def do_metric(self, arg):
+        """metric show <name|#> | edit <name|#> <field> "<value>" | reset <name|#>
+
+Manage individual metric definitions in the catalog.
+Fields you can edit: measurement, description
+        """
+        parts = shlex.split(arg)
+        if not parts:
+            print("Usage: metric show|edit|reset <name|#> [field] [value]")
+            return
+
+        cmd = parts[0].lower()
+        if len(parts) < 2:
+            print("Missing metric name or number.")
+            return
+
+        target = parts[1]
+
+        if cmd == "show":
+            entry = self._catalog.get(target)
+            if not entry:
+                print(f"  Metric '{target}' not found.")
+                return
+            source_mark = " (overridden by user)" if entry.get("source") == "user-override" else " (LLM-generated)"
+            print(f"\n  Name: {entry.get('name', '?')}{source_mark}")
+            print(f"  Kind: {entry.get('kind', '?')}")
+            print(f"  Priority: {entry.get('priority', '')}")
+            print(f"  Source Column: {entry.get('metric', '')}")
+            print(f"  Description: {entry.get('description', '')}")
+            print(f"  Measurement: {entry.get('measurement', '')}")
+            inf = entry.get("influences", [])
+            if inf:
+                inf_names = []
+                for iid in inf:
+                    ref = self._catalog.get(iid)
+                    inf_names.append(ref.get("name", iid) if ref else iid)
+                print(f"  Influences: {', '.join(inf_names)}")
+            print()
+
+        elif cmd == "edit":
+            if len(parts) < 4:
+                print("Usage: metric edit <name|#> <field> \"<value>\"")
+                print("  Fields: measurement, description")
+                return
+            field = parts[2].lower()
+            if field not in ("measurement", "description"):
+                print(f"  Cannot edit '{field}'. Allowed: measurement, description")
+                return
+            value = " ".join(parts[3:]).strip("\"'")
+            if self._catalog.edit(target, field, value):
+                self._catalog.save(self.project.metric_catalog_path)
+                print(f"  Updated {field} for '{target}'.")
+            else:
+                print(f"  Metric '{target}' not found.")
+
+        elif cmd == "reset":
+            if self._catalog.reset(target, self.project.priorities):
+                self._catalog.save(self.project.metric_catalog_path)
+                print(f"  Reset '{target}' to LLM-generated version.")
+            else:
+                print(f"  Metric '{target}' not found.")
+
+        else:
+            print("Usage: metric show|edit|reset <name|#> [field] [value]")
 
     def do_briefing(self, arg):
         """briefing [regenerate] — Show strategic briefing per priority"""
@@ -801,6 +910,7 @@ class AnalystShell(cmd.Cmd):
                 reasoning_framework=self._reasoning_framework,
                 context=None,
                 custom_instructions=self.project.custom_instructions,
+                catalog=self._catalog,
             )
         except KeyboardInterrupt:
             self.project.save()
@@ -877,6 +987,7 @@ class AnalystShell(cmd.Cmd):
                 reasoning_framework=self._reasoning_framework,
                 context=context,
                 custom_instructions=self.project.custom_instructions,
+                catalog=self._catalog,
             )
         except KeyboardInterrupt:
             self.project.save()

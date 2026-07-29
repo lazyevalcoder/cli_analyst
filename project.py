@@ -46,6 +46,10 @@ class Project:
     def analyses_dir(self) -> Path:
         return self.root / "analyses"
 
+    @property
+    def metric_catalog_path(self) -> Path:
+        return self.metadata_dir / "metric_catalog.json"
+
     def save(self) -> None:
         now = datetime.now().isoformat(timespec="seconds")
         self.updated_at = now

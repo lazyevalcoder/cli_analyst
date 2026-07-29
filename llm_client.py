@@ -40,6 +40,23 @@ TOOLS = [
                 "required": ["answer"]
             }
         }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "lookup_metric",
+            "description": "Look up a metric definition from the project's metric catalog. Returns the precise business formula and description for any KPI or supporting metric. Use this to get exact formulas instead of guessing.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "The name of the metric to look up (e.g., 'Revenue Growth Trajectory')"
+                    }
+                },
+                "required": ["name"]
+            }
+        }
     }
 ]
 

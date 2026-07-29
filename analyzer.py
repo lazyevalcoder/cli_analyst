@@ -7,6 +7,7 @@ import pandas as pd
 
 from config import CONFIG
 import llm_client
+from metric_catalog import MetricCatalog
 import sandbox
 
 KNOWLEDGE_DIR = Path(__file__).parent / "knowledge"
@@ -375,7 +376,7 @@ def build_step_summary(analysis_state: list[dict]) -> str:
     return "\n".join(lines)
 
 
-def agentic_answer(question: str, df, schema: str, structural_kg: dict, diagnostic_kg: dict, reasoning_framework: str, context: list[dict] = None, custom_instructions: list[str] = None) -> str:
+def agentic_answer(question: str, df, schema: str, structural_kg: dict, diagnostic_kg: dict, reasoning_framework: str, context: list[dict] = None, custom_instructions: list[str] = None, catalog: MetricCatalog = None) -> str:
     reasoning, plan, strategy, persona = reason_and_plan(question, schema, structural_kg, diagnostic_kg, reasoning_framework, context=context, custom_instructions=custom_instructions)
 
     print("\n  [Phase 1] Reasoning:")
@@ -423,7 +424,9 @@ Call final_answer when ALL of these are met:
   d) You have acknowledged any limitations
 
 APPROACH: Be exploratory but focused. Each code block should answer ONE question.
-If a step fails, analyze the error and try a corrected version."""
+If a step fails, analyze the error and try a corrected version.
+
+METRIC CATALOG: Use lookup_metric to retrieve precise formulas for any KPI or metric mentioned in the question. Do NOT guess formulas — look them up."""
 
     strategy_section = extract_strategy_section(strategy)
     strategy_guide = f"\n\nSTRATEGY GUIDE:\n{strategy_section}" if strategy_section else ""
@@ -516,6 +519,16 @@ Begin your analysis. Execute the first step of your plan."""
                 elif fn_name == "final_answer":
                     print("\n  [Phase 4] Synthesizing final answer...")
                     return args.get("answer", "(no answer)")
+                elif fn_name == "lookup_metric":
+                    metric_name = args.get("name", "")
+                    if catalog:
+                        entry = catalog.get(metric_name)
+                        if entry:
+                            result = catalog.format_for_prompt(metric_name)
+                        else:
+                            result = f"Metric '{metric_name}' not found in catalog."
+                    else:
+                        result = "Metric catalog not available."
                 else:
                     result = f"Unknown tool: {fn_name}"
 
