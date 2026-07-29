@@ -20,6 +20,8 @@ Without arguments, you get an interactive prompt to create or open a project, th
 (analyst) load data/sales.csv
 (analyst) init
 (analyst) priorities regenerate           # AI identifies strategic priorities from KGs
+(analyst) metrics                          # List all KPIs and supporting metrics
+(analyst) metric show "Revenue Growth Trajectory"  # Full definition + formula
 (analyst) priorities analyze 2            # Run full analysis on a priority
 (analyst) analyze "Why did sales decline in Q4?"
 (analyst) follow "What about the Northeast region specifically?"
@@ -37,7 +39,9 @@ Schema extracted (columns, types, samples)
        ↓
 `init` command: LLM builds Structural KG + Diagnostic KG + Reasoning Framework
        ↓
-[Proactive] AI identifies strategic business priorities from KGs (priorities)
+[Proactive] AI identifies strategic business priorities with KPIs from KGs (priorities)
+       ↓
+[Proactive] Metric catalog built — each KPI and supporting metric has a precise formula
        ↓
 [Proactive] AI generates a strategic briefing organized per priority (briefing)
        ↓
@@ -78,6 +82,7 @@ projects/
     │   ├── reasoning_framework.json    # Dataset-specific reasoning context
     │   ├── priorities.json             # Strategic business priorities
     │   ├── custom_instructions.json    # User-defined analysis methodology
+    │   ├── metric_catalog.json         # Metric definitions (built from priorities)
     │   └── briefing.json               # Cached strategic briefing
     └── analyses/
         ├── sales-decline/              # Auto-slugged from question
@@ -110,6 +115,11 @@ All projects live under a `projects/` folder. Everything is JSON — no database
 | `view relationships` | Show edge relationships from SKG (local) |
 | `view chains` | Show causal chains from DKG (local) |
 | `view hypotheses` | Show diagnostic hypotheses (local) |
+| `metrics [kpis\|supporting]` | List metric catalog (all, KPIs, or supporting metrics) |
+| `metric show <name\|#>` | Full definition: formula, description, influences |
+| `metric edit <name\|#> measurement "..."` | Override a metric's formula |
+| `metric edit <name\|#> description "..."` | Override a metric's description |
+| `metric reset <name\|#>` | Revert to LLM-generated version |
 | `analyze "question"` | Start a new analysis (4-phase pipeline) |
 | `follow "question"` | Follow up in current analysis (Q/Summary history in context) |
 | `analyses` | List all saved analyses |
@@ -137,6 +147,7 @@ Jul25/
 ├── shell.py                          # Interactive shell (cmd.Cmd)
 ├── analyzer.py                       # Schema, KGs, reasoning framework, agentic loop
 ├── llm_client.py                     # OpenAI SDK wrapper (llama.cpp) + tool calling
+├── metric_catalog.py                 # Per-project metric definitions (KPIs, supporting metrics)
 ├── sandbox.py                        # Safe Python execution (concurrent.futures, AST checks)
 ├── config.py                         # Centralized configuration (dataclass + env vars)
 ├── project.py                        # Project management (init, open, save, load)
@@ -240,15 +251,27 @@ At startup, the LLM generates:
 
 After building KGs via `init`, the AI automatically identifies 3-5 key business priorities for the dataset (e.g., Revenue Growth, Profitability, Customer Segments). These are derived from the schema, entities, measures, and causal chains in the knowledge graphs.
 
+Each priority includes:
+- **Professional name** — consulting-grade naming (Revenue Growth Trajectory, Profit Margin Evolution)
+- **KPIs** (1-3 outcome measures) — each with a precise business formula (`(Revenue - COGS) / Revenue * 100`)
+- **Supporting metrics** (5-10 driver metrics) — each linked to the KPIs they influence
+
 **Commands:**
 | Command | What it does |
 |---------|-------------|
-| `priorities` | List priorities with descriptions, key metrics, and analysis status |
+| `priorities` | List priorities with KPIs, supporting metrics, and analysis status |
 | `priorities regenerate` | Re-run AI identification from schema + KGs |
 | `priorities analyze <n>` | Run the full 4-phase pipeline on a priority — generates real findings with code execution, saves the result linked to that priority |
 | `priorities show <n>` | Display saved analysis summary for a priority |
+| `metrics` | List all metric definitions in the project catalog |
+| `metric show <name>` | View the full definition, including the LLM-lookupable formula |
+| `metric edit <name> measurement "..."` | Override a formula (user corrections persist) |
 
-Priorities can be analyzed on-demand. Each priority analysis runs through the same 4-phase pipeline as a user question, auto-constructing a question from the priority's description and key metrics. Results are saved as analysis turns under `analyses/_priority-<name>/` and linked back to the priority.
+### Metric Catalog
+
+When the LLM needs a precise formula during analysis, it calls the `lookup_metric` tool on-demand rather than having every definition injected into the prompt. The catalog supports user overrides — edit a formula and the LLM will use your version going forward.
+
+Priorities can be analyzed on-demand. Each priority analysis runs through the same 4-phase pipeline as a user question. Results are saved as analysis turns under `analyses/_priority-<name>/` and linked back to the priority.
 
 After analysis, `priorities` shows a `✓ Analyzed` marker. Use `review <slug>` for the full turn history.
 
@@ -308,12 +331,15 @@ python main.py list                   # List available projects
 
 ## Tool Calling
 
-The LLM has access to two tools:
+The LLM has access to three tools:
 
 | Tool | Description |
 |------|-------------|
 | `execute_code(code)` | Run Python code on the DataFrame (available as `df`) |
+| `lookup_metric(name)` | Look up a metric's precise formula and description from the project catalog |
 | `final_answer(answer)` | Provide the final answer to the user |
+
+`lookup_metric` is an *information tool* — the LLM calls it to retrieve exact formulas without guessing. This keeps context lean since definitions are not pre-injected into every prompt.
 
 ### Adding More Tools
 
@@ -364,16 +390,16 @@ CONFIG.temperature_synthesis  # Final answer synthesis (0.4)
 ## What's New
 
 - [x] **Strategic Priorities** — AI identifies key business priorities from KGs; run full analysis per priority
+- [x] **KPI Structure** — Each priority has 1-3 outcome KPIs with precise business formulas and 5-10 supporting driver metrics
+- [x] **Metric Catalog** — Standalone per-project library of metric definitions; LLM looks up formulas on demand via `lookup_metric` tool
 - [x] **Custom Analysis Instructions** — Persistent user-defined methodology rules injected into every analysis
 - [x] **Strategic Briefing** — Per-priority strategic overview generated from schema + KGs
 
 ## Future Plans
 
-- [ ] Add more tools (SQL queries, visualization, file export)
 - [ ] Update KGs with computed insights
 - [ ] Support multiple CSVs / joins
 - [ ] Web UI
-- [ ] Save/load analysis sessions
 
 ## Tech Stack
 
