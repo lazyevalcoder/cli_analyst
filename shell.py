@@ -91,7 +91,9 @@ class AnalystShell(cmd.Cmd):
             print("  Next: use 'init' to build knowledge graphs.")
         else:
             if p.priorities:
-                print(f"  Priorities: {len(p.priorities)} defined. Use 'priorities' to view.")
+                eq_total = sum(len(pri.get("executive_questions", [])) for pri in p.priorities)
+                eq_info = f", {eq_total} questions" if eq_total else ""
+                print(f"  Priorities: {len(p.priorities)} defined{eq_info}. Use 'priorities' to view.")
             if p.custom_instructions:
                 print(f"  Custom instructions: {len(p.custom_instructions)} saved.")
             if p.current_analysis:
@@ -196,7 +198,12 @@ class AnalystShell(cmd.Cmd):
         fw_avail = "[x]" if bool(p.reasoning_framework) else "-"
         fw_cached = "(disk)" if (p.metadata_dir / "reasoning_framework.json").exists() else ""
         print(f"  Framework: {fw_avail} {fw_cached}")
-        print(f"  Priorities: {len(p.priorities)} defined" if p.priorities else "  Priorities: -")
+        if p.priorities:
+            eq_total = sum(len(pri.get("executive_questions", [])) for pri in p.priorities)
+            eq_info = f", {eq_total} executive questions" if eq_total else ""
+            print(f"  Priorities: {len(p.priorities)} defined{eq_info}")
+        else:
+            print("  Priorities: -")
         print(f"  Custom instructions: {len(p.custom_instructions)} saved" if p.custom_instructions else "  Custom instructions: -")
         cat_n = len(self._catalog)
         if cat_n:
@@ -476,11 +483,13 @@ class AnalystShell(cmd.Cmd):
     def do_priorities(self, arg):
         """priorities [regenerate|analyze|show] — Strategic priorities for this dataset
 
+    Each priority contains 2-5 executive questions with KPIs and supporting metrics.
+
     Subcommands:
-      priorities                           Show all priorities
+      priorities                           Show all priorities with executive questions
       priorities regenerate                Re-identify priorities from schema + KGs
       priorities analyze <n>               Run full analysis on priority #n
-      priorities show <n>                  Show saved analysis for priority #n
+      priorities show <n>                  Show executive questions, KPIs, metrics for priority #n
         """
         parts = arg.strip().split(maxsplit=1)
         sub = parts[0].lower() if parts else "list"
@@ -535,12 +544,21 @@ class AnalystShell(cmd.Cmd):
 
             pri = self.project.priorities[idx]
             pname = pri.get("name", f"priority-{idx+1}")
-            kpi_names = [k.get("name", "") for k in pri.get("kpis", [])]
-            kpi_section = f" KPIs to track: {', '.join(kpi_names)}." if kpi_names else ""
-            question = (
-                f"Strategic analysis: {pri.get('description', pname)}. "
-                f"Focus areas: {pri.get('focus_areas', '')}.{kpi_section}"
-            ).strip()
+            eqs = pri.get("executive_questions", [])
+            if eqs:
+                eq_lines = [f"{j}. {eq.get('question', '?')}" for j, eq in enumerate(eqs, 1)]
+                eq_section = " Executive questions:\n" + "\n".join(f"  - {l}" for l in eq_lines)
+                question = (
+                    f"Strategic analysis: {pri.get('description', pname)}. "
+                    f"Focus areas: {pri.get('focus_areas', '')}.{eq_section}"
+                ).strip()
+            else:
+                kpi_names = [k.get("name", "") for k in pri.get("kpis", [])]
+                kpi_section = f" KPIs to track: {', '.join(kpi_names)}." if kpi_names else ""
+                question = (
+                    f"Strategic analysis: {pri.get('description', pname)}. "
+                    f"Focus areas: {pri.get('focus_areas', '')}.{kpi_section}"
+                ).strip()
 
             slug = _unique_slug(f"_priority-{_make_slug(pname)}", self._existing_analyses())
             analysis_dir = self.project.analyses_dir / slug
@@ -599,41 +617,78 @@ class AnalystShell(cmd.Cmd):
             pname = pri.get("name", f"priority-{idx+1}")
             summary = pri.get("analysis_summary", "")
             slug = pri.get("analysis_slug", "")
-            kpis = pri.get("kpis", [])
-            supporting = pri.get("supporting_metrics", [])
+            eqs = pri.get("executive_questions", [])
 
             print(f"\n  Priority: {pname}")
             print(f"  {pri.get('description', '')}")
+            if pri.get("focus_areas"):
+                print(f"  Focus: {pri.get('focus_areas', '')}")
 
-            if kpis:
-                print(f"\n  KPIs (outcome measures):")
-                for k in kpis:
-                    kn = k.get("name", "?")
-                    km = k.get("metric", "")
-                    kd = k.get("description", "")
-                    kmeas = k.get("measurement", "")
-                    print(f"    {kn} ({km})")
-                    print(f"      {kd}")
-                    if kmeas:
-                        print(f"      Measurement: {kmeas}")
+            if eqs:
+                for j, eq in enumerate(eqs, 1):
+                    qtext = eq.get("question", "?")
+                    kpis = eq.get("kpis", [])
+                    supporting = eq.get("supporting_metrics", [])
+                    print(f"\n  Executive Question {j}: {qtext}")
 
-            if supporting:
-                print(f"\n  Supporting Metrics (driver/context):")
-                for s in supporting:
-                    sn = s.get("name", "?")
-                    sm = s.get("metric", "")
-                    sd = s.get("description", "")
-                    smeas = s.get("measurement", "")
-                    inf = s.get("influences", [])
-                    print(f"    {sn} ({sm})")
-                    print(f"      {sd}")
-                    if smeas:
-                        print(f"      Measurement: {smeas}")
-                    if inf:
-                        print(f"      Influences: {', '.join(inf)}")
+                    if kpis:
+                        print(f"    KPIs (outcome measures):")
+                        for k in kpis:
+                            kn = k.get("name", "?")
+                            km = k.get("metric", "")
+                            kd = k.get("description", "")
+                            kmeas = k.get("measurement", "")
+                            print(f"      {kn} ({km})")
+                            print(f"        {kd}")
+                            if kmeas:
+                                print(f"        Measurement: {kmeas}")
 
-            if not kpis and not supporting:
-                print(f"\n  (Run 'priorities regenerate' for KPI-enriched view)")
+                    if supporting:
+                        print(f"    Supporting Metrics (driver/context):")
+                        for s in supporting:
+                            sn = s.get("name", "?")
+                            sm = s.get("metric", "")
+                            sd = s.get("description", "")
+                            smeas = s.get("measurement", "")
+                            inf = s.get("influences", [])
+                            print(f"      {sn} ({sm})")
+                            print(f"        {sd}")
+                            if smeas:
+                                print(f"        Measurement: {smeas}")
+                            if inf:
+                                print(f"        Influences: {', '.join(inf)}")
+            else:
+                kpis = pri.get("kpis", [])
+                supporting = pri.get("supporting_metrics", [])
+                if kpis:
+                    print(f"\n  KPIs (outcome measures):")
+                    for k in kpis:
+                        kn = k.get("name", "?")
+                        km = k.get("metric", "")
+                        kd = k.get("description", "")
+                        kmeas = k.get("measurement", "")
+                        print(f"    {kn} ({km})")
+                        print(f"      {kd}")
+                        if kmeas:
+                            print(f"      Measurement: {kmeas}")
+
+                if supporting:
+                    print(f"\n  Supporting Metrics (driver/context):")
+                    for s in supporting:
+                        sn = s.get("name", "?")
+                        sm = s.get("metric", "")
+                        sd = s.get("description", "")
+                        smeas = s.get("measurement", "")
+                        inf = s.get("influences", [])
+                        print(f"    {sn} ({sm})")
+                        print(f"      {sd}")
+                        if smeas:
+                            print(f"      Measurement: {smeas}")
+                        if inf:
+                            print(f"      Influences: {', '.join(inf)}")
+
+                if not kpis and not supporting:
+                    print(f"\n  (Run 'priorities regenerate' for KPI-enriched view)")
 
             if summary:
                 print(f"\n  Analysis summary:")
@@ -658,26 +713,45 @@ class AnalystShell(cmd.Cmd):
         for i, pri in enumerate(p.priorities, 1):
             name = pri.get("name", "?")
             desc = pri.get("description", "")
-            kpis = pri.get("kpis", [])
-            supporting = pri.get("supporting_metrics", [])
             focus = pri.get("focus_areas", "")
             analyzed = pri.get("analysis_summary", "")
+            eqs = pri.get("executive_questions", [])
+
             print(f"\n  {i}. {name}")
             if desc:
                 print(f"     {desc}")
-            if kpis:
-                kpi_str = ", ".join(k.get("name", "?") for k in kpis)
-                print(f"     KPIs: {kpi_str}")
-            if supporting:
-                sm_top = supporting[:5]
-                sm_str = ", ".join(s.get("name", "?") for s in sm_top)
-                if len(supporting) > 5:
-                    sm_str += f" (+{len(supporting) - 5} more)"
-                print(f"     Supporting Metrics: {sm_str}")
+
+            if eqs:
+                for j, eq in enumerate(eqs, 1):
+                    qtext = eq.get("question", "?")
+                    kpi_names = [k.get("name", "?") for k in eq.get("kpis", [])]
+                    sm_list = eq.get("supporting_metrics", [])
+                    sm_names = [s.get("name", "?") for s in sm_list]
+                    print(f"     Q{j}: {qtext}")
+                    if kpi_names:
+                        print(f"        KPIs: {', '.join(kpi_names)}")
+                    if sm_names:
+                        sm_str = ", ".join(sm_names[:3])
+                        if len(sm_names) > 3:
+                            sm_str += f" (+{len(sm_names) - 3} more)"
+                        print(f"        Supporting: {sm_str}")
+            else:
+                kpis = pri.get("kpis", [])
+                supporting = pri.get("supporting_metrics", [])
+                if kpis:
+                    kpi_str = ", ".join(k.get("name", "?") for k in kpis)
+                    print(f"     KPIs: {kpi_str}")
+                if supporting:
+                    sm_top = supporting[:5]
+                    sm_str = ", ".join(s.get("name", "?") for s in sm_top)
+                    if len(supporting) > 5:
+                        sm_str += f" (+{len(supporting) - 5} more)"
+                    print(f"     Supporting Metrics: {sm_str}")
+                if not kpis and not supporting:
+                    print(f"     (\u2192 Run 'priorities regenerate' for KPI-enriched view)")
+
             if focus:
                 print(f"     Focus: {focus}")
-            if not kpis and not supporting:
-                print(f"     (\u2192 Run 'priorities regenerate' for KPI-enriched view)")
             if analyzed:
                 slug_link = pri.get("analysis_slug", "?")
                 print(f'     \u2192 \u2713 Analyzed (use "priorities show {i}" or "review {slug_link}")')
@@ -707,10 +781,11 @@ class AnalystShell(cmd.Cmd):
             print(f"\n  Metric Catalog ({len(entries)} entries):")
 
         for e in entries:
-            kind_label = "[KPI]" if e.get("kind") == "kpi" else "[S]"
+            kind_label = "[KPI]" if e.get("type") == "kpi" else "[S]"
             source_mark = " (edited)" if e.get("source") == "user-override" else ""
+            eq_text = f" | Q: {e.get('executive_question', '')[:60]}" if e.get("executive_question") else ""
             print(f"    {e.get('id', '?')}: {e.get('name', '?')} {kind_label} ({e.get('metric', '?')}){source_mark}")
-            print(f"      Priority: {e.get('priority', '')}")
+            print(f"      Priority: {e.get('priority', '')}{eq_text}")
         print()
 
     def do_metric(self, arg):
@@ -738,8 +813,10 @@ Fields you can edit: measurement, description
                 return
             source_mark = " (overridden by user)" if entry.get("source") == "user-override" else " (LLM-generated)"
             print(f"\n  Name: {entry.get('name', '?')}{source_mark}")
-            print(f"  Kind: {entry.get('kind', '?')}")
+            print(f"  Kind: {entry.get('type', '?')}")
             print(f"  Priority: {entry.get('priority', '')}")
+            if entry.get("executive_question"):
+                print(f"  Executive Question: {entry.get('executive_question', '')}")
             print(f"  Source Column: {entry.get('metric', '')}")
             print(f"  Description: {entry.get('description', '')}")
             print(f"  Measurement: {entry.get('measurement', '')}")

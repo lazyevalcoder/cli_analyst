@@ -39,7 +39,7 @@ Schema extracted (columns, types, samples)
        ↓
 `init` command: LLM builds Structural KG + Diagnostic KG + Reasoning Framework
        ↓
-[Proactive] AI identifies strategic business priorities with KPIs from KGs (priorities)
+[Proactive] AI identifies strategic business priorities with executive questions and KPIs from KGs (priorities)
        ↓
 [Proactive] Metric catalog built — each KPI and supporting metric has a precise formula
        ↓
@@ -96,6 +96,29 @@ projects/
 
 All projects live under a `projects/` folder. Everything is JSON — no database needed.
 
+### Priority Structure
+
+Each priority in `priorities.json` follows this structure:
+
+```json
+{
+  "name": "Revenue Growth & Market Momentum",
+  "description": "...",
+  "focus_areas": "...",
+  "executive_questions": [
+    {
+      "question": "Are we generating enough pipeline to sustain growth?",
+      "kpis": [
+        { "name": "Revenue Growth Trajectory", "metric": "Sales", "description": "...", "measurement": "..." }
+      ],
+      "supporting_metrics": [
+        { "name": "Order Volume Trend", "metric": "Quantity", "description": "...", "measurement": "...", "influences": ["Revenue Growth Trajectory"] }
+      ]
+    }
+  ]
+}
+```
+
 ### Unified Knowledge Graph
 
 After `init`, a unified `knowledge_graph.json` is built by merging the Structural KG, Diagnostic KG, and Metric Catalog into a single graph with typed nodes and relationships. This graph enables the LLM to traverse relationships during analysis — understanding what influences a metric, what it depends on, and how it connects to business goals.
@@ -107,10 +130,10 @@ After `init`, a unified `knowledge_graph.json` is built by merging the Structura
 | `status` | Show project state (data loaded? graphs built?) |
 | `load <path>` | Load a CSV file, detect schema |
 | `init` | Build KGs + reasoning framework + auto-identify priorities |
-| `priorities` | Show strategic business priorities |
-| `priorities regenerate` | Re-identify priorities from schema + KGs |
-| `priorities analyze <n>` | Run full 4-phase analysis on a priority |
-| `priorities show <n>` | Show saved analysis for a priority |
+| `priorities` | Show strategic business priorities with executive questions |
+| `priorities regenerate` | Re-identify priorities (executive questions + KPIs + metrics) from schema + KGs |
+| `priorities analyze <n>` | Run full 4-phase analysis on a priority (includes executive questions) |
+| `priorities show <n>` | Show executive questions, KPIs, metrics, and saved analysis for a priority |
 | `briefing [regenerate]` | Show strategic briefing organized per priority |
 | `instructions` | List custom analysis instructions |
 | `instructions add "..."` | Add a methodology rule (saved per project) |
@@ -260,18 +283,21 @@ At startup, the LLM generates:
 
 After building KGs via `init`, the AI automatically identifies 3-5 key business priorities for the dataset (e.g., Revenue Growth, Profitability, Customer Segments). These are derived from the schema, entities, measures, and causal chains in the knowledge graphs.
 
-Each priority includes:
+Each priority follows a hierarchical structure:
 - **Professional name** — consulting-grade naming (Revenue Growth Trajectory, Profit Margin Evolution)
-- **KPIs** (1-3 outcome measures) — each with a precise business formula (`(Revenue - COGS) / Revenue * 100`)
-- **Supporting metrics** (5-10 driver metrics) — each linked to the KPIs they influence
+- **Executive Questions** (2-5 per priority) — decision-focused questions that a business leader would ask (e.g., "Are we generating enough pipeline to sustain growth?", "Are we converting efficiently?")
+  - **KPIs** (1-3 per question) — outcome measures, each with a precise business formula
+  - **Supporting metrics** (3-7 per question) — driver metrics explaining KPI movement, each linked to the KPIs they influence
+
+Priorities and their executive questions are MECE (Mutually Exclusive, Collectively Exhaustive) — no overlap between priorities or between questions within a priority.
 
 **Commands:**
 | Command | What it does |
 |---------|-------------|
-| `priorities` | List priorities with KPIs, supporting metrics, and analysis status |
+| `priorities` | List priorities with their executive questions, KPIs, supporting metrics, and analysis status |
 | `priorities regenerate` | Re-run AI identification from schema + KGs |
 | `priorities analyze <n>` | Run the full 4-phase pipeline on a priority — generates real findings with code execution, saves the result linked to that priority |
-| `priorities show <n>` | Display saved analysis summary for a priority |
+| `priorities show <n>` | Display full detail — executive questions, KPIs (with formulas), supporting metrics, and any saved analysis |
 | `metrics` | List all metric definitions in the project catalog |
 | `metric show <name>` | View the full definition, including the LLM-lookupable formula |
 | `metric edit <name> measurement "..."` | Override a formula (user corrections persist) |
@@ -280,7 +306,7 @@ Each priority includes:
 
 When the LLM needs a precise formula during analysis, it calls the `lookup_metric` tool on-demand rather than having every definition injected into the prompt. The catalog supports user overrides — edit a formula and the LLM will use your version going forward.
 
-The metric catalog is now built on a **knowledge graph** data model (`knowledge_graph.py`): flat entries are replaced with typed nodes (kpi, supporting_metric, entity, dimension) and typed edges (INFLUENCES, DERIVED_FROM, SUPPORTS). The LLM can use the `traverse_graph` tool to explore these relationships, enabling root-cause analysis and impact analysis without the full graph in its context window.
+The metric catalog is built on a **knowledge graph** data model (`knowledge_graph.py`): typed nodes (kpi, supporting_metric, entity, dimension, executive_question) and typed edges (INFLUENCES, DERIVED_FROM, SUPPORTS). The LLM can use the `traverse_graph` tool to explore these relationships, enabling root-cause analysis and impact analysis without the full graph in its context window.
 
 Priorities can be analyzed on-demand. Each priority analysis runs through the same 4-phase pipeline as a user question. Results are saved as analysis turns under `analyses/_priority-<name>/` and linked back to the priority.
 
@@ -404,8 +430,8 @@ CONFIG.temperature_synthesis  # Final answer synthesis (0.4)
 
 ## What's New
 
-- [x] **Strategic Priorities** — AI identifies key business priorities from KGs; run full analysis per priority
-- [x] **KPI Structure** — Each priority has 1-3 outcome KPIs with precise business formulas and 5-10 supporting driver metrics
+- [x] **Strategic Priorities** — AI identifies key business priorities from KGs; each priority has 2-5 executive questions, each with 1-3 KPIs and 3-7 supporting metrics; run full analysis per priority
+- [x] **Executive Questions** — Decision-focused questions bridge priorities to KPIs (e.g., "Are we generating enough pipeline?"); priorities and their questions are MECE
 - [x] **Metric Catalog** — Standalone per-project library of metric definitions; LLM looks up formulas on demand via `lookup_metric` tool
 - [x] **Custom Analysis Instructions** — Persistent user-defined methodology rules injected into every analysis
 - [x] **Strategic Briefing** — Per-priority strategic overview generated from schema + KGs

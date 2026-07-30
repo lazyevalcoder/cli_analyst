@@ -74,42 +74,85 @@ class KnowledgeGraph:
         edges = []
         for pri in priorities:
             pname = pri.get("name", "")
-            for k in pri.get("kpis", []):
-                kid = _slugify(k.get("name", ""))
-                if kid and kid not in seen:
-                    seen.add(kid)
-                    nodes.append({
-                        "id": kid,
-                        "name": k.get("name", ""),
-                        "type": "kpi",
-                        "priority": pname,
-                        "metric": k.get("metric", ""),
-                        "description": k.get("description", ""),
-                        "measurement": k.get("measurement", ""),
-                        "source": "llm-generated",
-                    })
-            for s in pri.get("supporting_metrics", []):
-                sid = _slugify(s.get("name", ""))
-                if sid and sid not in seen:
-                    seen.add(sid)
-                    nodes.append({
-                        "id": sid,
-                        "name": s.get("name", ""),
-                        "type": "supporting_metric",
-                        "priority": pname,
-                        "metric": s.get("metric", ""),
-                        "description": s.get("description", ""),
-                        "measurement": s.get("measurement", ""),
-                        "source": "llm-generated",
-                    })
-                    for ref in s.get("influences", []):
-                        ref_id = _slugify(ref)
-                        if ref_id:
-                            edges.append({
-                                "source": sid,
-                                "target": ref_id,
-                                "relation": "INFLUENCES",
+            eqs = pri.get("executive_questions", [])
+            if eqs:
+                for eq in eqs:
+                    eq_name = eq.get("question", "")
+                    for k in eq.get("kpis", []):
+                        kid = _slugify(k.get("name", ""))
+                        if kid and kid not in seen:
+                            seen.add(kid)
+                            nodes.append({
+                                "id": kid,
+                                "name": k.get("name", ""),
+                                "type": "kpi",
+                                "priority": pname,
+                                "executive_question": eq_name,
+                                "metric": k.get("metric", ""),
+                                "description": k.get("description", ""),
+                                "measurement": k.get("measurement", ""),
+                                "source": "llm-generated",
                             })
+                    for s in eq.get("supporting_metrics", []):
+                        sid = _slugify(s.get("name", ""))
+                        if sid and sid not in seen:
+                            seen.add(sid)
+                            nodes.append({
+                                "id": sid,
+                                "name": s.get("name", ""),
+                                "type": "supporting_metric",
+                                "priority": pname,
+                                "executive_question": eq_name,
+                                "metric": s.get("metric", ""),
+                                "description": s.get("description", ""),
+                                "measurement": s.get("measurement", ""),
+                                "source": "llm-generated",
+                            })
+                            for ref in s.get("influences", []):
+                                ref_id = _slugify(ref)
+                                if ref_id:
+                                    edges.append({
+                                        "source": sid,
+                                        "target": ref_id,
+                                        "relation": "INFLUENCES",
+                                    })
+            else:
+                for k in pri.get("kpis", []):
+                    kid = _slugify(k.get("name", ""))
+                    if kid and kid not in seen:
+                        seen.add(kid)
+                        nodes.append({
+                            "id": kid,
+                            "name": k.get("name", ""),
+                            "type": "kpi",
+                            "priority": pname,
+                            "metric": k.get("metric", ""),
+                            "description": k.get("description", ""),
+                            "measurement": k.get("measurement", ""),
+                            "source": "llm-generated",
+                        })
+                for s in pri.get("supporting_metrics", []):
+                    sid = _slugify(s.get("name", ""))
+                    if sid and sid not in seen:
+                        seen.add(sid)
+                        nodes.append({
+                            "id": sid,
+                            "name": s.get("name", ""),
+                            "type": "supporting_metric",
+                            "priority": pname,
+                            "metric": s.get("metric", ""),
+                            "description": s.get("description", ""),
+                            "measurement": s.get("measurement", ""),
+                            "source": "llm-generated",
+                        })
+                        for ref in s.get("influences", []):
+                            ref_id = _slugify(ref)
+                            if ref_id:
+                                edges.append({
+                                    "source": sid,
+                                    "target": ref_id,
+                                    "relation": "INFLUENCES",
+                                })
         return cls(nodes, edges)
 
     # ---- build unified graph from all sources ----
