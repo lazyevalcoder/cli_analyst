@@ -11,6 +11,7 @@ import pandas as pd
 from src.analyst import agent
 from src.analyst import builder
 from src.analyst import llm
+from src.analyst import viewer
 from src.analyst.config import CONFIG
 from src.analyst.graph import KnowledgeGraph
 from src.analyst.storage import append_jsonl, read_jsonl, save_json
@@ -53,8 +54,10 @@ class AnalystShell(cmd.Cmd):
         self.df = None
         self._reasoning_framework = ""
         self._catalog = KnowledgeGraph()
+        self._viewer_server = None
         self._load_state()
         self._check_llm()
+        self._start_viewer()
         self._print_welcome()
 
     def onecmd(self, line):
@@ -1253,8 +1256,19 @@ Fields you can edit: measurement, description
         dest.write_text(md, encoding="utf-8")
         print(f"Exported {len(turns)} turn(s) to {dest.resolve()}")
 
+    def _start_viewer(self):
+        if not self.project.root or not self.project.root.exists():
+            return
+        try:
+            self._viewer_server = viewer.start_background(self.project.root.parent)
+            print(f"  Web viewer: http://localhost:8081")
+        except Exception as e:
+            print(f"  Web viewer: failed to start ({e})")
+
     def do_quit(self, arg):
         """quit — Save and exit"""
+        if self._viewer_server:
+            self._viewer_server.shutdown()
         self.project.save()
         print("Project saved. Goodbye!")
         return True

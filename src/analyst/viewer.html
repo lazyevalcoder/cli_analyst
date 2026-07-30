@@ -1,0 +1,593 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Analyst Viewer</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: 'Segoe UI', system-ui, sans-serif; background: #f5f5f5; color: #222; height: 100vh; overflow: hidden; }
+
+.layout { display: flex; height: 100vh; }
+
+.sidebar {
+  width: 280px; min-width: 200px; max-width: 400px;
+  border-right: 1px solid #ddd; background: #fafafa;
+  display: flex; flex-direction: column; overflow: hidden;
+}
+.sidebar-header { padding: 12px 14px; font-size: 14px; font-weight: 600; color: #1a1a2e; border-bottom: 1px solid #ddd; background: #fff; }
+.tree-container { flex: 1; overflow-y: auto; padding: 4px 0; }
+.tree-node { user-select: none; }
+.tree-node .row {
+  display: flex; align-items: center; gap: 4px;
+  padding: 3px 12px; cursor: pointer; font-size: 13px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.tree-node .row:hover { background: #e8e8e8; }
+.tree-node .row.selected { background: #d0e4f7; }
+.tree-node .row .arrow { width: 14px; text-align: center; flex-shrink: 0; font-size: 10px; color: #666; }
+.tree-node .row .icon { flex-shrink: 0; font-size: 14px; }
+.tree-node .row .name { overflow: hidden; text-overflow: ellipsis; }
+.children { padding-left: 16px; }
+.children.collapsed { display: none; }
+
+.resizer { width: 4px; cursor: col-resize; background: transparent; flex-shrink: 0; position: relative; z-index: 10; }
+.resizer:hover, .resizer.active { background: #4fc3f7; }
+
+.viewer { flex: 1; overflow-y: auto; display: flex; flex-direction: column; }
+.viewer-placeholder { flex: 1; display: flex; align-items: center; justify-content: center; color: #999; font-size: 15px; }
+.loading { padding: 40px; text-align: center; color: #999; }
+.error-msg { margin: 20px; padding: 12px 16px; background: #ffebee; color: #c62828; border-radius: 6px; font-size: 13px; }
+
+/* ---- Shared components ---- */
+.file-header {
+  padding: 10px 20px; font-size: 13px; color: #555;
+  background: #fff; border-bottom: 1px solid #eee; position: sticky; top: 0; z-index: 5;
+  font-family: 'Cascadia Code', 'Fira Code', monospace;
+}
+.badge { display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: 11px; font-weight: 600; margin-left: 8px; }
+.badge-view { background: #e3f2fd; color: #1565c0; }
+.badge-json { background: #e8eaf6; color: #283593; }
+.badge-csv { background: #fff3e0; color: #e65100; }
+.badge-md { background: #e8f5e9; color: #2e7d32; }
+.badge-text { background: #f3e5f5; color: #6a1b9a; }
+.badge-binary { background: #fce4ec; color: #c62828; }
+.badge-kpi { background: #bbdefb; color: #0d47a1; font-size: 10px; padding: 1px 6px; }
+.badge-sm { background: #c8e6c9; color: #1b5e20; font-size: 10px; padding: 1px 6px; }
+.tag { display: inline-block; padding: 1px 6px; border-radius: 4px; font-size: 11px; margin: 1px; }
+.tag-numeric { background: #fff3e0; color: #e65100; }
+.tag-datetime { background: #e8eaf6; color: #283593; }
+.tag-text { background: #f3e5f5; color: #6a1b9a; }
+.mono { font-family: 'Cascadia Code', 'Fira Code', monospace; font-size: 12px; }
+
+.section { margin: 0; padding: 20px; background: #fff; }
+.section+.section { border-top: 1px solid #eee; }
+.section h2 { font-size: 16px; margin-bottom: 12px; color: #1a1a2e; }
+.section h3 { font-size: 14px; margin: 12px 0 6px; color: #333; }
+
+table { width: 100%; border-collapse: collapse; font-size: 13px; margin: 4px 0 12px; }
+th, td { text-align: left; padding: 6px 10px; border-bottom: 1px solid #ddd; }
+th { background: #f5f5f5; font-weight: 600; }
+td { background: #fff; max-width: 320px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* ---- Markdown body ---- */
+.md-body { line-height: 1.7; font-size: 14px; }
+.md-body h1, .md-body h2, .md-body h3 { margin: 16px 0 8px; color: #1a1a2e; }
+.md-body h2 { font-size: 15px; }
+.md-body h3 { font-size: 14px; }
+.md-body table { width: 100%; border-collapse: collapse; margin: 8px 0; font-size: 13px; }
+.md-body th, .md-body td { border: 1px solid #ddd; padding: 5px 10px; text-align: left; }
+.md-body th { background: #f0f0f0; }
+.md-body code { background: #f0f0f0; padding: 1px 5px; border-radius: 3px; font-size: 13px; }
+.md-body pre { background: #1e1e1e; color: #d4d4d4; padding: 12px 16px; border-radius: 6px; overflow-x: auto; font-size: 13px; }
+.md-body pre code { background: none; padding: 0; }
+.md-body ul, .md-body ol { padding-left: 24px; margin: 4px 0; }
+.md-body blockquote { border-left: 3px solid #4fc3f7; padding-left: 12px; color: #555; margin: 8px 0; }
+.md-body p { margin: 6px 0; }
+
+/* ---- Priority card ---- */
+.priority-card {
+  border-radius: 8px; padding: 16px; margin: 12px 0;
+  box-shadow: 0 1px 3px rgba(0,0,0,.08);
+}
+.priority-card h3 { margin-top: 0; }
+.eq { margin: 8px 0 8px 16px; border-left: 3px solid #4fc3f7; padding-left: 12px; }
+.eq h4 { font-size: 13px; color: #1a1a2e; margin-bottom: 4px; }
+.eq .metric-row { font-size: 13px; margin: 2px 0 2px 12px; }
+
+/* ---- Analysis turns ---- */
+.turn { margin: 0 0 1px 0; padding: 14px 20px; background: #fff; }
+.turn .q { font-weight: 600; color: #1a1a2e; margin-bottom: 6px; }
+.turn .q::before { content: 'Q: '; color: #4fc3f7; }
+.turn .a .md-body { margin-top: 2px; }
+
+/* ---- JSON syntax ---- */
+.json-view {
+  margin: 0; padding: 16px 20px;
+  font-family: 'Cascadia Code', 'Fira Code', monospace;
+  font-size: 13px; line-height: 1.5; white-space: pre-wrap; word-break: break-word;
+  background: #fff;
+}
+.json-key { color: #881391; }
+.json-string { color: #1a1aa6; }
+.json-number { color: #1c6b1c; }
+.json-boolean { color: #b45f06; }
+.json-null { color: #999; }
+
+.text-view {
+  margin: 0; padding: 16px 20px;
+  font-family: 'Cascadia Code', 'Fira Code', monospace;
+  font-size: 13px; line-height: 1.5; white-space: pre-wrap; word-break: break-word;
+  background: #fff;
+}
+.csv-wrap { overflow-x: auto; padding: 0; }
+.csv-table td { max-width: 300px; }
+
+.meta-card { background: #fff; padding: 16px 20px; }
+.meta-card dt { font-weight: 600; font-size: 12px; color: #888; margin-top: 8px; }
+.meta-card dd { font-size: 13px; color: #333; }
+</style>
+</head>
+<body>
+
+<div class="layout">
+  <div class="sidebar" id="sidebar">
+    <div class="sidebar-header">Projects</div>
+    <div class="tree-container" id="tree-container">
+      <div class="loading" id="tree-loading">Loading...</div>
+      <div class="error-msg" id="tree-error" style="display:none;"></div>
+    </div>
+  </div>
+  <div class="resizer" id="resizer"></div>
+  <div class="viewer" id="file-viewer">
+    <div class="viewer-placeholder">Select a file from the tree to view its contents</div>
+  </div>
+</div>
+
+<script>
+let selectedEl = null;
+
+function esc(s) {
+  if (!s) return '';
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+function fileIcon(type) {
+  const m = { json: '{}', csv: '📊', markdown: '📝', text: '📄', image: '🖼', binary: '📦' };
+  return m[type] || '📄';
+}
+
+function badgeCls(type) {
+  const m = { json: 'badge-json', csv: 'badge-csv', markdown: 'badge-md', text: 'badge-text', binary: 'badge-binary' };
+  return m[type] || '';
+}
+
+function badgeLbl(type) {
+  const m = { json: 'JSON', csv: 'CSV', markdown: 'MD', text: 'TXT', image: 'IMG', binary: 'BIN' };
+  return m[type] || type.toUpperCase();
+}
+
+const VIEW_LABELS = {
+  analysis_turns: 'Analysis', structural_kg: 'Structural KG', diagnostic_kg: 'Diagnostic KG',
+  schema: 'Schema', priorities: 'Priorities', briefing: 'Briefing',
+  metric_catalog: 'Metric Catalog', knowledge_graph: 'Unified KG',
+  reasoning_framework: 'Reasoning Framework', custom_instructions: 'Instructions',
+  project_meta: 'Project Meta',
+};
+
+// ---- Tree ----
+
+async function loadTree() {
+  const loading = document.getElementById('tree-loading');
+  const errorEl = document.getElementById('tree-error');
+  const container = document.getElementById('tree-container');
+  try {
+    const resp = await fetch('/api/tree');
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const data = await resp.json();
+    if (loading) loading.remove();
+    if (!data.projects || data.projects.length === 0) {
+      container.innerHTML = '<div style="padding:16px;color:#888;font-size:13px;">No projects found.</div>';
+      return;
+    }
+    const root = document.createElement('div');
+    data.projects.forEach(p => renderNode(p, root, 0));
+    container.appendChild(root);
+  } catch (e) {
+    if (loading) loading.style.display = 'none';
+    errorEl.textContent = 'Failed to load project tree: ' + e.message;
+    errorEl.style.display = 'block';
+  }
+}
+
+function renderNode(node, parent, depth) {
+  const div = document.createElement('div');
+  div.className = 'tree-node';
+  const row = document.createElement('div');
+  row.className = 'row';
+  row.style.paddingLeft = (12 + depth * 16) + 'px';
+
+  if (node.type === 'directory') {
+    const arrow = document.createElement('span');
+    arrow.className = 'arrow'; arrow.textContent = '▼';
+    row.appendChild(arrow);
+    const icon = document.createElement('span');
+    icon.className = 'icon'; icon.textContent = '📁';
+    row.appendChild(icon);
+    const name = document.createElement('span');
+    name.className = 'name'; name.textContent = node.name;
+    row.appendChild(name);
+    const childrenDiv = document.createElement('div');
+    childrenDiv.className = 'children';
+    div.appendChild(row);
+    div.appendChild(childrenDiv);
+    arrow.addEventListener('click', (e) => {
+      e.stopPropagation();
+      childrenDiv.classList.toggle('collapsed');
+      arrow.textContent = childrenDiv.classList.contains('collapsed') ? '▶' : '▼';
+    });
+    (node.children || []).forEach(c => renderNode(c, childrenDiv, depth + 1));
+  } else {
+    const spacer = document.createElement('span');
+    spacer.className = 'arrow'; row.appendChild(spacer);
+    const icon = document.createElement('span');
+    icon.className = 'icon'; icon.textContent = fileIcon(node.fileType);
+    row.appendChild(icon);
+    const name = document.createElement('span');
+    name.className = 'name'; name.textContent = node.name;
+    row.appendChild(name);
+    row.addEventListener('click', () => {
+      if (selectedEl) selectedEl.classList.remove('selected');
+      row.classList.add('selected');
+      selectedEl = row;
+      loadFile(node.path);
+    });
+    div.appendChild(row);
+  }
+  parent.appendChild(div);
+}
+
+// ---- File loading ----
+
+async function loadFile(path) {
+  const viewer = document.getElementById('file-viewer');
+  viewer.innerHTML = '<div class="loading">Loading...</div>';
+  try {
+    const resp = await fetch('/api/file?path=' + encodeURIComponent(path));
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const data = await resp.json();
+    if (data.error) { viewer.innerHTML = `<div class="error-msg">${esc(data.error)}</div>`; return; }
+    renderFile(data);
+  } catch (e) {
+    viewer.innerHTML = `<div class="error-msg">Failed to load: ${esc(e.message)}</div>`;
+  }
+}
+
+function renderFile(data) {
+  const viewer = document.getElementById('file-viewer');
+  const vt = data.viewType;
+  let header = `<div class="file-header">${esc(data.path)}`;
+
+  if (vt) {
+    header += ` <span class="badge badge-view">${esc(VIEW_LABELS[vt] || vt)}</span>`;
+  } else if (data.type === 'json') {
+    header += ' <span class="badge badge-json">JSON</span>';
+  } else {
+    header += ` <span class="badge ${badgeCls(data.type)}">${badgeLbl(data.type)}</span>`;
+  }
+  header += '</div>';
+
+  let body = '';
+  if (vt) {
+    body = renderView(vt, data.content);
+  } else if (data.type === 'json') {
+    body = '<pre class="json-view">' + syntaxHighlight(JSON.stringify(data.content, null, 2)) + '</pre>';
+  } else if (data.type === 'csv') {
+    body = renderCSV(data.content);
+  } else if (data.type === 'markdown') {
+    body = '<div class="section md-body">' + data.content + '</div>';
+  } else if (data.type === 'text') {
+    body = '<pre class="text-view">' + esc(data.content) + '</pre>';
+  } else if (data.type === 'binary') {
+    body = '<div class="section" style="text-align:center;color:#999;">Cannot preview binary file</div>';
+  }
+
+  viewer.innerHTML = header + body;
+  viewer.scrollTop = 0;
+}
+
+// ---- View dispatcher ----
+
+function renderView(vt, content) {
+  switch (vt) {
+    case 'priorities': return viewPriorities(content);
+    case 'schema': return viewSchema(content);
+    case 'structural_kg': return viewStructuralKG(content);
+    case 'diagnostic_kg': return viewDiagnosticKG(content);
+    case 'metric_catalog': return viewMetricCatalog(content);
+    case 'knowledge_graph': return viewKnowledgeGraph(content);
+    case 'briefing': return viewBriefing(content);
+    case 'reasoning_framework': return viewReasoningFramework(content);
+    case 'custom_instructions': return viewCustomInstructions(content);
+    case 'analysis_turns': return viewAnalysisTurns(content);
+    case 'project_meta': return viewProjectMeta(content);
+    default: return '<pre class="json-view">' + syntaxHighlight(JSON.stringify(content, null, 2)) + '</pre>';
+  }
+}
+
+// ---- View: Priorities ----
+
+function viewPriorities(list) {
+  if (!Array.isArray(list) || list.length === 0) return '<div class="section">No priorities defined.</div>';
+  let h = `<div class="section"><h2>Strategic Priorities (${list.length})</h2>`;
+  list.forEach((pri, i) => {
+    h += `<div class="priority-card">`;
+    h += `<h3>${i + 1}. ${esc(pri.name)}</h3>`;
+    h += `<div class="md-body" style="font-size:13px;color:#555;">${pri.description_html || esc(pri.description || '')}</div>`;
+    if (pri.focus_areas) h += `<p style="color:#888;font-size:12px;margin-top:4px;">Focus: ${esc(pri.focus_areas)}</p>`;
+    const eqs = pri.executive_questions || [];
+    eqs.forEach((eq, j) => {
+      h += `<div class="eq"><h4>E${j + 1}: ${esc(eq.question)}</h4>`;
+      (eq.kpis || []).forEach(k => {
+        h += `<div class="metric-row"><span class="badge badge-kpi">KPI</span> <strong>${esc(k.name)}</strong> <span class="mono">(${esc(k.metric)})</span>`;
+        if (k.measurement) h += `<br><span style="color:#555;font-size:12px;margin-left:40px;">${esc(k.measurement)}</span>`;
+        h += `</div>`;
+      });
+      (eq.supporting_metrics || []).forEach(s => {
+        h += `<div class="metric-row"><span class="badge badge-sm">S</span> <strong>${esc(s.name)}</strong> <span class="mono">(${esc(s.metric)})</span>`;
+        if (s.measurement) h += `<br><span style="color:#555;font-size:12px;margin-left:40px;">${esc(s.measurement)}</span>`;
+        if (s.influences && s.influences.length) h += `<br><span style="color:#777;font-size:12px;margin-left:40px;">Influences: ${esc(s.influences.join(', '))}</span>`;
+        h += `</div>`;
+      });
+      h += `</div>`;
+    });
+    if (pri.analysis_summary_html) {
+      h += `<details style="margin-top:8px;"><summary style="cursor:pointer;font-size:13px;font-weight:600;color:#1565c0;">Analysis Summary</summary>`;
+      h += `<div class="md-body" style="margin-top:8px;padding:8px 0;">${pri.analysis_summary_html}</div></details>`;
+    } else if (!pri.analysis_summary) {
+      h += `<p style="color:#999;font-size:12px;margin-top:8px;">Not yet analyzed.</p>`;
+    }
+    h += `</div>`;
+  });
+  h += `</div>`;
+  return h;
+}
+
+// ---- View: Schema ----
+
+function viewSchema(s) {
+  const cols = s.columns || [];
+  if (!cols.length) return '<div class="section">No schema available.</div>';
+  const hasSamples = cols.some(c => c.sample && c.sample.length);
+  let h = `<div class="section"><h2>Schema (${s.rows || '?'} rows, ${cols.length} columns)</h2><table><tr><th>Column</th><th>Type</th><th>Kind</th><th>Unique</th>${hasSamples ? '<th>Samples</th>' : ''}</tr>`;
+  cols.forEach(c => {
+    const kt = c.kind === 'numeric' ? 'tag-numeric' : c.kind === 'datetime' ? 'tag-datetime' : 'tag-text';
+    h += `<tr><td><strong>${esc(c.name)}</strong></td><td class="mono">${esc(c.dtype)}</td><td><span class="tag ${kt}">${esc(c.kind)}</span></td><td>${c.unique ?? '?'}</td>`;
+    if (hasSamples) h += `<td class="mono">${c.sample ? esc(c.sample.join(', ')) : '-'}</td>`;
+    h += `</tr>`;
+  });
+  h += `</table></div>`;
+  return h;
+}
+
+// ---- View: Structural KG ----
+
+function viewStructuralKG(skg) {
+  const nodes = skg.nodes || [];
+  const edges = skg.edges || [];
+  const entities = nodes.filter(n => n.type === 'entity');
+  const measures = nodes.filter(n => n.type === 'measure');
+  const dimensions = nodes.filter(n => n.type === 'dimension');
+  let h = `<div class="section"><h2>Structural Knowledge Graph</h2><p style="color:#888;font-size:13px;">${nodes.length} nodes, ${edges.length} edges</p>`;
+
+  function nodeTable(title, items) {
+    if (!items.length) return '';
+    let t = `<h3>${title} (${items.length})</h3><table><tr><th>Label</th></tr>`;
+    items.forEach(n => t += `<tr><td>${esc(n.label || n.id || '?')}</td></tr>`);
+    t += `</table>`;
+    return t;
+  }
+
+  h += nodeTable('Entities', entities);
+  h += nodeTable('Measures', measures);
+  h += nodeTable('Dimensions', dimensions);
+
+  if (edges.length) {
+    h += `<h3>Relationships (${edges.length})</h3><table><tr><th>Source</th><th>Relation</th><th>Target</th></tr>`;
+    edges.forEach(e => h += `<tr><td>${esc(e.source || '?')}</td><td>${esc(e.relation || '?')}</td><td>${esc(e.target || '?')}</td></tr>`);
+    h += `</table>`;
+  }
+  h += `</div>`;
+  return h;
+}
+
+// ---- View: Diagnostic KG ----
+
+function viewDiagnosticKG(dkg) {
+  const chains = dkg.chains || [];
+  const hyps = dkg.hypotheses || [];
+  let h = `<div class="section"><h2>Diagnostic Knowledge Graph</h2><p style="color:#888;font-size:13px;">${chains.length} chains, ${hyps.length} hypotheses</p>`;
+  if (chains.length) {
+    h += `<h3>Causal Chains</h3>`;
+    chains.forEach(c => {
+      h += `<div style="margin:6px 0;padding:8px 12px;background:#fafafa;border-radius:4px;">`;
+      h += `<strong>${esc(c.metric || '?')}</strong> &rarr; ${esc((c.path || []).join(' → '))}`;
+      if (c.explanation) h += `<br><span style="color:#555;font-size:13px;">${esc(c.explanation)}</span>`;
+      h += `</div>`;
+    });
+  }
+  if (hyps.length) {
+    h += `<h3>Hypotheses</h3><ul style="padding-left:20px;font-size:13px;">`;
+    hyps.forEach(hp => h += `<li>${esc(hp)}</li>`);
+    h += `</ul>`;
+  }
+  h += `</div>`;
+  return h;
+}
+
+// ---- View: Metric Catalog ----
+
+function viewMetricCatalog(kg) {
+  const nodes = kg.nodes || [];
+  const entries = nodes.filter(n => n.type === 'kpi' || n.type === 'supporting_metric');
+  if (!entries.length) return '<div class="section">Metric catalog is empty.</div>';
+  let h = `<div class="section"><h2>Metric Catalog (${entries.length})</h2><table><tr><th>Name</th><th>Type</th><th>Priority</th><th>Q</th><th>Column</th><th>Formula</th></tr>`;
+  entries.forEach(e => {
+    const t = e.type === 'kpi' ? '<span class="badge badge-kpi">KPI</span>' : '<span class="badge badge-sm">S</span>';
+    h += `<tr><td><strong>${esc(e.name)}</strong></td><td>${t}</td><td>${esc(e.priority || '')}</td><td class="mono">${esc((e.executive_question || '').slice(0, 50))}</td><td class="mono">${esc(e.metric || '')}</td><td class="mono" style="font-size:11px;">${esc((e.measurement || '').slice(0, 80))}</td></tr>`;
+  });
+  h += `</table></div>`;
+  return h;
+}
+
+// ---- View: Unified Knowledge Graph ----
+
+function viewKnowledgeGraph(kg) {
+  const nodes = kg.nodes || [];
+  const edges = kg.edges || [];
+  let h = `<div class="section"><h2>Unified Knowledge Graph</h2><p style="color:#888;font-size:13px;">${nodes.length} nodes, ${edges.length} edges</p>`;
+
+  if (nodes.length) {
+    h += `<h3>Nodes by Type</h3><table><tr><th>Type</th><th>Name</th><th>Priority</th><th>Metric</th></tr>`;
+    nodes.forEach(n => {
+      h += `<tr><td>${esc(n.type || '?')}</td><td><strong>${esc(n.name || n.id || '?')}</strong></td><td>${esc(n.priority || '')}</td><td class="mono">${esc(n.metric || '')}</td></tr>`;
+    });
+    h += `</table>`;
+  }
+  if (edges.length) {
+    h += `<h3>Edges (${edges.length})</h3><table><tr><th>Source</th><th>Relation</th><th>Target</th></tr>`;
+    edges.forEach(e => h += `<tr><td>${esc(e.source || '?')}</td><td>${esc(e.relation || '?')}</td><td>${esc(e.target || '?')}</td></tr>`);
+    h += `</table>`;
+  }
+  h += `</div>`;
+  return h;
+}
+
+// ---- View: Briefing ----
+
+function viewBriefing(b) {
+  const insights = b.priority_insights || [];
+  const questions = b.suggested_questions || [];
+  if (!insights.length && !questions.length) return '<div class="section">No cached briefing. Run <code>briefing regenerate</code> in CLI.</div>';
+  let h = `<div class="section"><h2>Strategic Briefing</h2>`;
+  insights.forEach(item => {
+    h += `<div class="priority-card">`;
+    h += `<h3>${esc(item.priority || '')}</h3>`;
+    h += `<div class="md-body">${item.insight_html || esc(item.insight || '')}</div>`;
+    h += `</div>`;
+  });
+  if (questions.length) {
+    h += `<h3>Suggested Questions</h3><ul style="padding-left:20px;">`;
+    questions.forEach(q => h += `<li>${esc(q)}</li>`);
+    h += `</ul>`;
+  }
+  h += `</div>`;
+  return h;
+}
+
+// ---- View: Reasoning Framework ----
+
+function viewReasoningFramework(rf) {
+  const text = rf.text || '';
+  if (!text) return '<div class="section">No reasoning framework data.</div>';
+  return '<div class="section md-body">' + text.replace(/\n/g, '<br>') + '</div>';
+}
+
+// ---- View: Custom Instructions ----
+
+function viewCustomInstructions(ci) {
+  if (!Array.isArray(ci) || ci.length === 0) return '<div class="section">No custom instructions defined.</div>';
+  let h = `<div class="section"><h2>Custom Instructions (${ci.length})</h2><ol style="padding-left:20px;font-size:14px;line-height:1.8;">`;
+  ci.forEach(s => h += `<li>${esc(s)}</li>`);
+  h += `</ol></div>`;
+  return h;
+}
+
+// ---- View: Analysis Turns ----
+
+function viewAnalysisTurns(turns) {
+  if (!Array.isArray(turns) || turns.length === 0) return '<div class="section">No analysis turns found.</div>';
+  let h = `<div><div class="section"><h2>Analysis Turns (${turns.length})</h2></div>`;
+  turns.forEach((t, i) => {
+    h += `<div class="turn">`;
+    h += `<div class="q">${esc(t.question || '')}</div>`;
+    h += `<div class="a">${t.summary_html || '<em>No summary</em>'}</div>`;
+    h += `</div>`;
+  });
+  h += `</div>`;
+  return h;
+}
+
+// ---- View: Project Meta ----
+
+function viewProjectMeta(meta) {
+  let h = `<div class="meta-card"><h2>${esc(meta.name || 'Project')}</h2><dl>`;
+  if (meta.created_at) h += `<dt>Created</dt><dd>${esc(meta.created_at)}</dd>`;
+  if (meta.updated_at) h += `<dt>Updated</dt><dd>${esc(meta.updated_at)}</dd>`;
+  if (meta.data_path) h += `<dt>Data</dt><dd class="mono">${esc(meta.data_path)}</dd>`;
+  if (meta.current_analysis) h += `<dt>Current Analysis</dt><dd class="mono">${esc(meta.current_analysis)}</dd>`;
+  h += `</dl></div>`;
+  return h;
+}
+
+// ---- CSV ----
+
+function renderCSV(content) {
+  if (!content.columns || !content.rows) return '<div class="section">Empty CSV</div>';
+  let h = `<div class="section"><p style="font-size:13px;color:#888;margin-bottom:8px;">${content.rowCount} rows, ${content.columns.length} columns</p>`;
+  h += '<div class="csv-wrap"><table class="csv-table"><thead><tr><th>#</th>';
+  content.columns.forEach(c => h += '<th>' + esc(String(c)) + '</th>');
+  h += '</tr></thead><tbody>';
+  content.rows.forEach((row, i) => {
+    h += '<tr><td style="color:#999;font-size:11px;">' + (i + 1) + '</td>';
+    row.forEach(cell => h += '<td>' + esc(String(cell)) + '</td>');
+    h += '</tr>';
+  });
+  h += '</tbody></table></div></div>';
+  return h;
+}
+
+// ---- JSON syntax highlight ----
+
+function syntaxHighlight(json) {
+  return json.replace(/("(\\u[a-fA-F0-9]{4}|\\[^u]|[^"\\])*"(\s*:)?|\b(true|false|null)\b|-?\d+(?:\.\d*)?(?:[eE][+\-]?\d+)?)/g, (match) => {
+    let cls = 'json-number';
+    if (/^"/.test(match)) {
+      cls = /:$/.test(match) ? 'json-key' : 'json-string';
+    } else if (/true|false/.test(match)) {
+      cls = 'json-boolean';
+    } else if (/null/.test(match)) {
+      cls = 'json-null';
+    }
+    return '<span class="' + cls + '">' + match + '</span>';
+  });
+}
+
+// ---- Resizer ----
+
+(function() {
+  const resizer = document.getElementById('resizer');
+  const sidebar = document.getElementById('sidebar');
+  let startX, startW;
+  resizer.addEventListener('mousedown', (e) => {
+    startX = e.clientX; startW = sidebar.offsetWidth;
+    resizer.classList.add('active');
+    document.body.style.cursor = 'col-resize'; document.body.style.userSelect = 'none';
+  });
+  document.addEventListener('mousemove', (e) => {
+    if (!resizer.classList.contains('active')) return;
+    const w = startW + (e.clientX - startX);
+    sidebar.style.width = Math.max(200, Math.min(400, w)) + 'px';
+  });
+  document.addEventListener('mouseup', () => {
+    resizer.classList.remove('active');
+    document.body.style.cursor = ''; document.body.style.userSelect = '';
+  });
+})();
+
+// ---- Init ----
+
+loadTree();
+</script>
+</body>
+</html>
