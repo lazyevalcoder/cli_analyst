@@ -8,7 +8,7 @@ from contextlib import redirect_stdout
 
 import pandas as pd
 
-from config import CONFIG
+from src.analyst.config import CONFIG
 
 BLOCKED_SUBSTRINGS = [
     "import os", "import sys", "import subprocess", "import shutil",

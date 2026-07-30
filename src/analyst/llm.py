@@ -4,7 +4,7 @@ import time
 
 from openai import OpenAI
 
-from config import CONFIG
+from src.analyst.config import CONFIG
 
 TOOLS = [
     {

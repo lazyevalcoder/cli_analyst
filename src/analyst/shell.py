@@ -6,12 +6,14 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-import analyzer
-import llm_client
 import pandas as pd
-from config import CONFIG
-from knowledge_graph import KnowledgeGraph
-from storage import append_jsonl, read_jsonl, save_json
+
+from src.analyst import agent
+from src.analyst import builder
+from src.analyst import llm
+from src.analyst.config import CONFIG
+from src.analyst.graph import KnowledgeGraph
+from src.analyst.storage import append_jsonl, read_jsonl, save_json
 
 
 def _make_slug(text: str) -> str:
@@ -105,14 +107,14 @@ class AnalystShell(cmd.Cmd):
                     print("  Use 'priorities' to generate strategic priorities first.")
 
     def _check_llm(self):
-        if not llm_client.check_availability():
+        if not llm.check_availability():
             print(f"Warning: LLM not available at {CONFIG.base_url}")
             print("  Graph building and deep analysis will fail.\n")
 
     def _load_state(self):
         if self.project.is_data_loaded():
             try:
-                self.df = analyzer.load_csv(str(self.project.data_path))
+                self.df = builder.load_csv(str(self.project.data_path))
                 print(f"Reloaded {self.project.data_path.name}: {len(self.df)} rows, {len(self.df.columns)} columns")
             except Exception as e:
                 print(f"Could not reload data: {e}")
@@ -164,7 +166,7 @@ class AnalystShell(cmd.Cmd):
         sub = arg.strip().lower()
 
         if sub == "llm":
-            ok = llm_client.check_availability()
+            ok = llm.check_availability()
             if ok:
                 print("  LLM: available")
             else:
@@ -274,7 +276,7 @@ class AnalystShell(cmd.Cmd):
 
         print(f"Loading {path.name}...", end="", flush=True)
         try:
-            df = analyzer.load_csv(str(path))
+            df = builder.load_csv(str(path))
         except Exception as e:
             print(f" failed: {e}")
             return
@@ -288,7 +290,7 @@ class AnalystShell(cmd.Cmd):
         self.project.data_path = dest
 
         print("Extracting schema...")
-        schema_dict = analyzer.build_schema_dict(df)
+        schema_dict = builder.build_schema_dict(df)
         self.project.schema = schema_dict
 
         # Invalidate stale KGs, priorities, cached framework
@@ -309,10 +311,10 @@ class AnalystShell(cmd.Cmd):
 
         # Schema (extract locally, no LLM)
         if not self.project.has_schema():
-            schema_dict = analyzer.build_schema_dict(self.df)
+            schema_dict = builder.build_schema_dict(self.df)
             self.project.schema = schema_dict
             print("Schema extracted.")
-        schema_str = analyzer.extract_schema(self.df)
+        schema_str = builder.extract_schema(self.df)
 
         # Structural KG
         if self.project.has_structural_kg():
@@ -322,7 +324,7 @@ class AnalystShell(cmd.Cmd):
             else:
                 t0 = time.time()
                 print("  Building structural KG...", end="", flush=True)
-                kg = analyzer.build_structural_kg(schema_str)
+                kg = builder.build_structural_kg(schema_str)
                 elapsed = time.time() - t0
                 print(f" done ({elapsed:.1f}s)")
                 print(f"  {len(kg.get('nodes', []))} nodes, {len(kg.get('edges', []))} edges")
@@ -330,7 +332,7 @@ class AnalystShell(cmd.Cmd):
         else:
             t0 = time.time()
             print("  Building structural KG...", end="", flush=True)
-            kg = analyzer.build_structural_kg(schema_str)
+            kg = builder.build_structural_kg(schema_str)
             elapsed = time.time() - t0
             print(f" done ({elapsed:.1f}s)")
             print(f"  {len(kg.get('nodes', []))} nodes, {len(kg.get('edges', []))} edges")
@@ -349,7 +351,7 @@ class AnalystShell(cmd.Cmd):
             else:
                 t0 = time.time()
                 print("  Building diagnostic KG...", end="", flush=True)
-                kg = analyzer.build_diagnostic_kg(self.project.structural_kg)
+                kg = builder.build_diagnostic_kg(self.project.structural_kg)
                 elapsed = time.time() - t0
                 print(f" done ({elapsed:.1f}s)")
                 print(f"  {len(kg.get('chains', []))} chains, {len(kg.get('hypotheses', []))} hypotheses")
@@ -357,14 +359,14 @@ class AnalystShell(cmd.Cmd):
         else:
             t0 = time.time()
             print("  Building diagnostic KG...", end="", flush=True)
-            kg = analyzer.build_diagnostic_kg(self.project.structural_kg)
+            kg = builder.build_diagnostic_kg(self.project.structural_kg)
             elapsed = time.time() - t0
             print(f" done ({elapsed:.1f}s)")
             print(f"  {len(kg.get('chains', []))} chains, {len(kg.get('hypotheses', []))} hypotheses")
             self.project.diagnostic_kg = kg
 
         # Reasoning framework (cached to disk — no LLM call on next open)
-        self._reasoning_framework = analyzer.get_full_reasoning_framework(
+        self._reasoning_framework = builder.get_full_reasoning_framework(
             schema_str, self.project.structural_kg, self.project.diagnostic_kg
         )
         self.project.reasoning_framework = self._reasoning_framework
@@ -373,7 +375,7 @@ class AnalystShell(cmd.Cmd):
         # Proactive: identify strategic priorities
         print("\n  Identifying strategic priorities...", end="", flush=True)
         try:
-            priorities = analyzer.identify_priorities(schema_str, self.project.structural_kg, self.project.diagnostic_kg)
+            priorities = builder.identify_priorities(schema_str, self.project.structural_kg, self.project.diagnostic_kg)
             if priorities:
                 self.project.priorities = priorities
                 self.project.save()
@@ -500,10 +502,10 @@ class AnalystShell(cmd.Cmd):
         if sub == "regenerate":
             if not self._require_data() or not self.project.has_structural_kg():
                 return
-            schema_str = analyzer.extract_schema(self.df)
+            schema_str = builder.extract_schema(self.df)
             print("  Regenerating strategic priorities...", end="", flush=True)
             try:
-                priorities = analyzer.identify_priorities(schema_str, self.project.structural_kg, self.project.diagnostic_kg)
+                priorities = builder.identify_priorities(schema_str, self.project.structural_kg, self.project.diagnostic_kg)
                 if priorities:
                     self.project.priorities = priorities
                     self.project.save()
@@ -564,11 +566,11 @@ class AnalystShell(cmd.Cmd):
             analysis_dir = self.project.analyses_dir / slug
             analysis_dir.mkdir(parents=True, exist_ok=True)
 
-            schema_str = analyzer.extract_schema(self.df)
+            schema_str = builder.extract_schema(self.df)
             print(f"\n  Running analysis on priority [{pname}]...\n")
 
             try:
-                answer = analyzer.agentic_answer(
+                answer = agent.agentic_answer(
                     question=question,
                     df=self.df,
                     schema=schema_str,
@@ -888,10 +890,10 @@ Fields you can edit: measurement, description
             if not self.project.priorities:
                 print("  No priorities defined. Run 'priorities regenerate' first.")
                 return
-            schema_str = analyzer.extract_schema(self.df)
+            schema_str = builder.extract_schema(self.df)
             print("  Generating strategic briefing...", end="", flush=True)
             try:
-                briefing = analyzer.generate_briefing(schema_str, self.project.structural_kg, self.project.diagnostic_kg, self.project.priorities)
+                briefing = builder.generate_briefing(schema_str, self.project.structural_kg, self.project.diagnostic_kg, self.project.priorities)
                 self.project.briefing_cache = briefing
                 self.project.save()
                 print(" done")
@@ -1000,8 +1002,8 @@ Fields you can edit: measurement, description
             if self.project.reasoning_framework:
                 self._reasoning_framework = self.project.reasoning_framework
             elif self.project.has_structural_kg():
-                schema_str = analyzer.extract_schema(self.df)
-                self._reasoning_framework = analyzer.get_full_reasoning_framework(
+                schema_str = builder.extract_schema(self.df)
+                self._reasoning_framework = builder.get_full_reasoning_framework(
                     schema_str, self.project.structural_kg, self.project.diagnostic_kg
                 )
 
@@ -1009,12 +1011,12 @@ Fields you can edit: measurement, description
         analysis_dir = self.project.analyses_dir / slug
         analysis_dir.mkdir(parents=True, exist_ok=True)
 
-        schema_str = analyzer.extract_schema(self.df)
+        schema_str = builder.extract_schema(self.df)
         print(f"\nAnalysis slug: {slug}")
         print(f"Question: {question}\n")
 
         try:
-            answer = analyzer.agentic_answer(
+            answer = agent.agentic_answer(
                 question=question,
                 df=self.df,
                 schema=schema_str,
@@ -1075,7 +1077,7 @@ Fields you can edit: measurement, description
             _show_turns(turns, max_chars=200)
             print(f"\nFollow-up: {question}")
 
-        schema_str = analyzer.extract_schema(self.df)
+        schema_str = builder.extract_schema(self.df)
 
         context = [{"question": t["question"], "summary": t["summary"]} for t in turns]
 
@@ -1084,14 +1086,14 @@ Fields you can edit: measurement, description
             if self.project.reasoning_framework:
                 self._reasoning_framework = self.project.reasoning_framework
             elif self.project.has_structural_kg():
-                self._reasoning_framework = analyzer.get_full_reasoning_framework(
+                self._reasoning_framework = builder.get_full_reasoning_framework(
                     schema_str, self.project.structural_kg, self.project.diagnostic_kg
                 )
 
         print()
 
         try:
-            answer = analyzer.agentic_answer(
+            answer = agent.agentic_answer(
                 question=question,
                 df=self.df,
                 schema=schema_str,

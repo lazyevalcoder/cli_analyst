@@ -4,7 +4,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-from storage import load_json, save_json
+from src.analyst.storage import load_json, save_json
 
 ANALYST_META = "analyst.json"
 PROJECTS_DIR = "projects"
