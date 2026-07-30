@@ -43,6 +43,8 @@ Schema extracted (columns, types, samples)
        ↓
 [Proactive] Metric catalog built — each KPI and supporting metric has a precise formula
        ↓
+[Proactive] Unified knowledge graph built — merges SKG nodes, DKG chains, and catalog into a traversable graph with typed relationships (INFLUENCES, DERIVED_FROM, SUPPORTS, etc.)
+       ↓
 [Proactive] AI generates a strategic briefing organized per priority (briefing)
        ↓
 User asks question (analyze) or runs priority analysis (priorities analyze <n>)
@@ -82,7 +84,8 @@ projects/
     │   ├── reasoning_framework.json    # Dataset-specific reasoning context
     │   ├── priorities.json             # Strategic business priorities
     │   ├── custom_instructions.json    # User-defined analysis methodology
-    │   ├── metric_catalog.json         # Metric definitions (built from priorities)
+    │   ├── metric_catalog.json         # Metric definitions (backward-compat)
+    │   ├── knowledge_graph.json        # Unified graph: nodes + edges from KGs + catalog
     │   └── briefing.json               # Cached strategic briefing
     └── analyses/
         ├── sales-decline/              # Auto-slugged from question
@@ -92,6 +95,10 @@ projects/
 ```
 
 All projects live under a `projects/` folder. Everything is JSON — no database needed.
+
+### Unified Knowledge Graph
+
+After `init`, a unified `knowledge_graph.json` is built by merging the Structural KG, Diagnostic KG, and Metric Catalog into a single graph with typed nodes and relationships. This graph enables the LLM to traverse relationships during analysis — understanding what influences a metric, what it depends on, and how it connects to business goals.
 
 ## Interactive Shell Commands
 
@@ -120,6 +127,8 @@ All projects live under a `projects/` folder. Everything is JSON — no database
 | `metric edit <name\|#> measurement "..."` | Override a metric's formula |
 | `metric edit <name\|#> description "..."` | Override a metric's description |
 | `metric reset <name\|#>` | Revert to LLM-generated version |
+| `graph show` | Show node/edge type summary of the knowledge graph |
+| `graph traverse <node> [relation]` | Explore graph connections (e.g., what INFLUENCES Revenue) |
 | `analyze "question"` | Start a new analysis (4-phase pipeline) |
 | `follow "question"` | Follow up in current analysis (Q/Summary history in context) |
 | `analyses` | List all saved analyses |
@@ -147,7 +156,7 @@ Jul25/
 ├── shell.py                          # Interactive shell (cmd.Cmd)
 ├── analyzer.py                       # Schema, KGs, reasoning framework, agentic loop
 ├── llm_client.py                     # OpenAI SDK wrapper (llama.cpp) + tool calling
-├── metric_catalog.py                 # Per-project metric definitions (KPIs, supporting metrics)
+├── knowledge_graph.py                # Unified graph: metric catalog + KG nodes/edges + traversal
 ├── sandbox.py                        # Safe Python execution (concurrent.futures, AST checks)
 ├── config.py                         # Centralized configuration (dataclass + env vars)
 ├── project.py                        # Project management (init, open, save, load)
@@ -271,6 +280,8 @@ Each priority includes:
 
 When the LLM needs a precise formula during analysis, it calls the `lookup_metric` tool on-demand rather than having every definition injected into the prompt. The catalog supports user overrides — edit a formula and the LLM will use your version going forward.
 
+The metric catalog is now built on a **knowledge graph** data model (`knowledge_graph.py`): flat entries are replaced with typed nodes (kpi, supporting_metric, entity, dimension) and typed edges (INFLUENCES, DERIVED_FROM, SUPPORTS). The LLM can use the `traverse_graph` tool to explore these relationships, enabling root-cause analysis and impact analysis without the full graph in its context window.
+
 Priorities can be analyzed on-demand. Each priority analysis runs through the same 4-phase pipeline as a user question. Results are saved as analysis turns under `analyses/_priority-<name>/` and linked back to the priority.
 
 After analysis, `priorities` shows a `✓ Analyzed` marker. Use `review <slug>` for the full turn history.
@@ -331,15 +342,16 @@ python main.py list                   # List available projects
 
 ## Tool Calling
 
-The LLM has access to three tools:
+The LLM has access to four tools:
 
 | Tool | Description |
 |------|-------------|
 | `execute_code(code)` | Run Python code on the DataFrame (available as `df`) |
 | `lookup_metric(name)` | Look up a metric's precise formula and description from the project catalog |
+| `traverse_graph(node, [relation])` | Explore relationships in the knowledge graph (e.g., what INFLUENCES Revenue, what is DERIVED_FROM Orders) |
 | `final_answer(answer)` | Provide the final answer to the user |
 
-`lookup_metric` is an *information tool* — the LLM calls it to retrieve exact formulas without guessing. This keeps context lean since definitions are not pre-injected into every prompt.
+`lookup_metric` and `traverse_graph` are *information tools* — the LLM calls them to retrieve exact formulas or explore causal relationships without guessing. This keeps context lean since definitions are not pre-injected into every prompt.
 
 ### Adding More Tools
 
@@ -359,6 +371,9 @@ Created by LLM from Structural KG. Contains:
 - Causal chains (sales depends on quantity, segment, etc.)
 - Dimensions affecting each metric
 - Diagnostic hypotheses ("if X declined, check Y")
+
+### Unified Knowledge Graph
+After `init`, the three sources are merged into a single `knowledge_graph.json` with typed nodes and edges. This graph powers the `traverse_graph` LLM tool, enabling the AI to reason about causal chains, data lineage (`DERIVED_FROM`), and business relationships during analysis without having the full graph in its prompt context.
 
 ## Safety
 
@@ -394,12 +409,14 @@ CONFIG.temperature_synthesis  # Final answer synthesis (0.4)
 - [x] **Metric Catalog** — Standalone per-project library of metric definitions; LLM looks up formulas on demand via `lookup_metric` tool
 - [x] **Custom Analysis Instructions** — Persistent user-defined methodology rules injected into every analysis
 - [x] **Strategic Briefing** — Per-priority strategic overview generated from schema + KGs
+- [x] **Unified Knowledge Graph** — SKG, DKG, and metric catalog merged into a single traversable graph with typed relationships; LLM uses `traverse_graph` tool to explore causal chains, data lineage, and business connections on demand
 
 ## Future Plans
 
 - [ ] Update KGs with computed insights
 - [ ] Support multiple CSVs / joins
 - [ ] Web UI
+- [ ] **Config-as-code** — declarative project file (YAML/JSON) where developers define priorities, KPIs, metrics, and methodology; analysts just analyze
 
 ## Tech Stack
 

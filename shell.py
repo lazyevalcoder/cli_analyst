@@ -10,7 +10,7 @@ import analyzer
 import llm_client
 import pandas as pd
 from config import CONFIG
-from metric_catalog import MetricCatalog
+from knowledge_graph import KnowledgeGraph
 from storage import append_jsonl, read_jsonl, save_json
 
 
@@ -50,7 +50,7 @@ class AnalystShell(cmd.Cmd):
         self.project = project
         self.df = None
         self._reasoning_framework = ""
-        self._catalog = MetricCatalog()
+        self._catalog = KnowledgeGraph()
         self._load_state()
         self._check_llm()
         self._print_welcome()
@@ -118,8 +118,8 @@ class AnalystShell(cmd.Cmd):
         if self.project.reasoning_framework:
             self._reasoning_framework = self.project.reasoning_framework
 
-        # Load metric catalog
-        self._catalog = MetricCatalog.load(self.project.metric_catalog_path)
+        # Load knowledge graph (backward compat with old metric_catalog.json)
+        self._catalog = KnowledgeGraph.load(self.project.metric_catalog_path)
 
     def _require_data(self) -> bool:
         if self.df is None:
@@ -138,6 +138,15 @@ class AnalystShell(cmd.Cmd):
             print("Diagnostic KG not built. Use 'init' first.")
             return False
         return True
+
+    def _build_unified_graph(self):
+        kg = KnowledgeGraph.build_from_kgs(
+            self.project.structural_kg,
+            self.project.diagnostic_kg,
+            self.project.priorities,
+        )
+        kg.save(self.project.knowledge_graph_path)
+        print(f"  Unified knowledge graph saved ({len(kg._nodes)} nodes, {len(kg._edges)} edges)")
 
     def _existing_analyses(self) -> set:
         if not self.project.analyses_dir.exists():
@@ -361,8 +370,9 @@ class AnalystShell(cmd.Cmd):
             if priorities:
                 self.project.priorities = priorities
                 self.project.save()
-                self._catalog = MetricCatalog.build_from(priorities)
+                self._catalog = KnowledgeGraph.build_from(priorities)
                 self._catalog.save(self.project.metric_catalog_path)
+                self._build_unified_graph()
                 print(" done")
                 print(f"\n  Strategic Priorities identified:")
                 for i, p in enumerate(priorities, 1):
@@ -488,8 +498,9 @@ class AnalystShell(cmd.Cmd):
                 if priorities:
                     self.project.priorities = priorities
                     self.project.save()
-                    self._catalog = MetricCatalog.build_from(priorities)
+                    self._catalog = KnowledgeGraph.build_from(priorities)
                     self._catalog.save(self.project.metric_catalog_path)
+                    self._build_unified_graph()
                     print(" done")
                 else:
                     print(" skipped (empty result)")
@@ -548,7 +559,7 @@ class AnalystShell(cmd.Cmd):
                     reasoning_framework=self._reasoning_framework,
                     context=None,
                     custom_instructions=self.project.custom_instructions,
-                    catalog=self._catalog,
+                    graph=self._catalog,
                 )
             except KeyboardInterrupt:
                 self.project.save()
@@ -557,7 +568,7 @@ class AnalystShell(cmd.Cmd):
             now = datetime.now().isoformat(timespec="seconds")
             append_jsonl(analysis_dir / "turns.jsonl", {"timestamp": now, "question": question, "summary": answer})
 
-            pri["analysis_summary"] = answer[:300]
+            pri["analysis_summary"] = answer
             pri["analysis_slug"] = slug
             self.project.save()
 
@@ -732,13 +743,9 @@ Fields you can edit: measurement, description
             print(f"  Source Column: {entry.get('metric', '')}")
             print(f"  Description: {entry.get('description', '')}")
             print(f"  Measurement: {entry.get('measurement', '')}")
-            inf = entry.get("influences", [])
+            inf = self._catalog._influence_names(entry["id"])
             if inf:
-                inf_names = []
-                for iid in inf:
-                    ref = self._catalog.get(iid)
-                    inf_names.append(ref.get("name", iid) if ref else iid)
-                print(f"  Influences: {', '.join(inf_names)}")
+                print(f"  Influences: {', '.join(inf)}")
             print()
 
         elif cmd == "edit":
@@ -753,6 +760,7 @@ Fields you can edit: measurement, description
             value = " ".join(parts[3:]).strip("\"'")
             if self._catalog.edit(target, field, value):
                 self._catalog.save(self.project.metric_catalog_path)
+                self._catalog.save(self.project.knowledge_graph_path)
                 print(f"  Updated {field} for '{target}'.")
             else:
                 print(f"  Metric '{target}' not found.")
@@ -760,12 +768,40 @@ Fields you can edit: measurement, description
         elif cmd == "reset":
             if self._catalog.reset(target, self.project.priorities):
                 self._catalog.save(self.project.metric_catalog_path)
+                self._catalog.save(self.project.knowledge_graph_path)
                 print(f"  Reset '{target}' to LLM-generated version.")
             else:
                 print(f"  Metric '{target}' not found.")
 
         else:
             print("Usage: metric show|edit|reset <name|#> [field] [value]")
+
+    def do_graph(self, arg):
+        """graph show|traverse <node> [relation] — Explore the knowledge graph
+
+    Subcommands:
+      graph show                        Show node/edge summary
+      graph traverse <node> [relation]  Show connections for a node
+        """
+        parts = shlex.split(arg)
+        if not parts:
+            print("Usage: graph show|traverse <node> [relation]")
+            return
+        sub = parts[0].lower()
+
+        if sub == "show":
+            print(f"\n  Knowledge Graph:\n{self._catalog.format_summary()}\n")
+
+        elif sub == "traverse":
+            if len(parts) < 2:
+                print("Usage: graph traverse <node> [relation]")
+                return
+            node = parts[1]
+            relation = parts[2] if len(parts) > 2 else None
+            print(f"\n{self._catalog.format_traverse(node, relation)}\n")
+
+        else:
+            print(f"Unknown graph subcommand: {sub}")
 
     def do_briefing(self, arg):
         """briefing [regenerate] — Show strategic briefing per priority"""
@@ -910,7 +946,7 @@ Fields you can edit: measurement, description
                 reasoning_framework=self._reasoning_framework,
                 context=None,
                 custom_instructions=self.project.custom_instructions,
-                catalog=self._catalog,
+                graph=self._catalog,
             )
         except KeyboardInterrupt:
             self.project.save()
@@ -987,7 +1023,7 @@ Fields you can edit: measurement, description
                 reasoning_framework=self._reasoning_framework,
                 context=context,
                 custom_instructions=self.project.custom_instructions,
-                catalog=self._catalog,
+                graph=self._catalog,
             )
         except KeyboardInterrupt:
             self.project.save()

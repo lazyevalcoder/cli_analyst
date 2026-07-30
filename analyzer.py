@@ -7,7 +7,7 @@ import pandas as pd
 
 from config import CONFIG
 import llm_client
-from metric_catalog import MetricCatalog
+from knowledge_graph import KnowledgeGraph
 import sandbox
 
 KNOWLEDGE_DIR = Path(__file__).parent / "knowledge"
@@ -376,7 +376,7 @@ def build_step_summary(analysis_state: list[dict]) -> str:
     return "\n".join(lines)
 
 
-def agentic_answer(question: str, df, schema: str, structural_kg: dict, diagnostic_kg: dict, reasoning_framework: str, context: list[dict] = None, custom_instructions: list[str] = None, catalog: MetricCatalog = None) -> str:
+def agentic_answer(question: str, df, schema: str, structural_kg: dict, diagnostic_kg: dict, reasoning_framework: str, context: list[dict] = None, custom_instructions: list[str] = None, graph: KnowledgeGraph = None) -> str:
     reasoning, plan, strategy, persona = reason_and_plan(question, schema, structural_kg, diagnostic_kg, reasoning_framework, context=context, custom_instructions=custom_instructions)
 
     print("\n  [Phase 1] Reasoning:")
@@ -426,7 +426,9 @@ Call final_answer when ALL of these are met:
 APPROACH: Be exploratory but focused. Each code block should answer ONE question.
 If a step fails, analyze the error and try a corrected version.
 
-METRIC CATALOG: Use lookup_metric to retrieve precise formulas for any KPI or metric mentioned in the question. Do NOT guess formulas — look them up."""
+METRIC CATALOG: Use lookup_metric to retrieve precise formulas for any KPI or metric mentioned in the question. Do NOT guess formulas — look them up.
+
+KNOWLEDGE GRAPH: Use traverse_graph to explore relationships between metrics, dimensions, and business goals. This helps you understand what influences a metric, what it depends on, and how it connects to other business concepts."""
 
     strategy_section = extract_strategy_section(strategy)
     strategy_guide = f"\n\nSTRATEGY GUIDE:\n{strategy_section}" if strategy_section else ""
@@ -521,14 +523,21 @@ Begin your analysis. Execute the first step of your plan."""
                     return args.get("answer", "(no answer)")
                 elif fn_name == "lookup_metric":
                     metric_name = args.get("name", "")
-                    if catalog:
-                        entry = catalog.get(metric_name)
+                    if graph:
+                        entry = graph.get(metric_name)
                         if entry:
-                            result = catalog.format_for_prompt(metric_name)
+                            result = graph.format_for_prompt(metric_name)
                         else:
                             result = f"Metric '{metric_name}' not found in catalog."
                     else:
                         result = "Metric catalog not available."
+                elif fn_name == "traverse_graph":
+                    node_name = args.get("node", "")
+                    relation = args.get("relation", None)
+                    if graph:
+                        result = graph.format_traverse(node_name, relation)
+                    else:
+                        result = "Knowledge graph not available."
                 else:
                     result = f"Unknown tool: {fn_name}"
 

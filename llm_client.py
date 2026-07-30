@@ -57,6 +57,27 @@ TOOLS = [
                 "required": ["name"]
             }
         }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "traverse_graph",
+            "description": "Explore relationships in the knowledge graph. Given a node name, returns connected nodes and their relationship types. Use this to understand what influences a metric, what a metric depends on, or what business goals it supports.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "node": {
+                        "type": "string",
+                        "description": "The name or ID of the node to explore (e.g., 'Revenue', 'Discount %')"
+                    },
+                    "relation": {
+                        "type": "string",
+                        "description": "Optional: filter by relationship type (e.g., 'INFLUENCES', 'DERIVED_FROM', 'SUPPORTS'). Leave empty to show all."
+                    }
+                },
+                "required": ["node"]
+            }
+        }
     }
 ]
 
