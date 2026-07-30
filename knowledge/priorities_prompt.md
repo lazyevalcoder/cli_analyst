@@ -62,13 +62,17 @@ Return a JSON object:
 === RULES ===
 
 - Each priority must have 1-3 KPIs and 5-10 supporting metrics
+- Priorities must be MECE (Mutually Exclusive, Collectively Exhaustive): no two priorities share the same focus area, column, or metric concept. Every business concern belongs to exactly one priority.
 - Each supporting metric must influence at least one KPI (use the influences field)
+- Only supporting_metrics have an influences field — KPIs must not include it
+- A metric must never appear in its own influences field (no self-references)
 - Use exact column names from the schema for the metric field
 - KPI and metric names must be professional and descriptive — think "Revenue Growth Trajectory", "Profit Margin Evolution", "Segment Composition Shift", not "Revenue" or "Profit"
 - Names should indicate the time dimension (Trajectory, Momentum, Trend, Evolution) or distribution lens (Concentration, Mix, Composition, Share)
 - The measurement field must be a complete, precise business formula using business language (not code)
 - Use the causal chains and dimensions_affecting from the DKG to determine which supporting metrics influence which KPIs
 - Use the SKG entities, dimensions, and measures to identify meaningful metrics
+- No two supporting metrics across the entire framework should measure the same driver — each tells a distinct story
 
 EXAMPLE (e-commerce dataset):
 
