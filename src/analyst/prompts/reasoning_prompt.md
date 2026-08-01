@@ -18,11 +18,18 @@ QUESTION: {question}
 
 {context_section}
 
+METRIC BRIEF (pre-defined KPIs + supporting metrics to compute):
+{metric_brief}
+
 USING THE FRAMEWORK ABOVE:
 1. Which analysis strategy fits this question?
 2. Which persona perspective is relevant?
 3. What sub-questions need answering?
 4. In what order should you investigate?
+
+When a METRIC BRIEF is present, plan it in two phases:
+- Phase 1: compute EVERY KPI in the brief (value + delta vs prior) and its supporting metrics.
+- Phase 2: for KPIs that are OFF (declining, anomalous, negative delta), drill down by the listed dimensions to locate where the issue originates. Healthy KPIs skip the drill-down.
 
 Return ONLY a JSON object.
 

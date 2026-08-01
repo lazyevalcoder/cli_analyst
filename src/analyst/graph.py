@@ -6,8 +6,42 @@ from pathlib import Path
 from typing import Optional
 
 
-def _slugify(name: str) -> str:
-    return re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_")
+def _slugify(name: str, sep: str = "_") -> str:
+    return re.sub(r"[^a-z0-9]+", sep, name.lower()).strip(sep)
+
+
+def format_structural_kg(kg: dict) -> str:
+    lines = ["=== Structural Knowledge Graph ===", ""]
+    for node in kg.get("nodes", []):
+        lines.append(f"  [{node.get('type', '?').upper()}] {node.get('label', node.get('id', '?'))}")
+    lines.append("")
+    for edge in kg.get("edges", []):
+        src = edge.get("source", "?")
+        rel = edge.get("relation", "?")
+        tgt = edge.get("target", "?")
+        lines.append(f"  {src} --{rel}--> {tgt}")
+    return "\n".join(lines)
+
+
+def format_diagnostic_kg(kg: dict) -> str:
+    lines = ["=== Diagnostic Knowledge Graph ===", ""]
+    for chain in kg.get("chains", []):
+        path_str = " -> ".join(chain.get("path", []))
+        lines.append(f"  {chain.get('metric', '?')}: {path_str}")
+        lines.append(f"    {chain.get('explanation', '')}")
+        lines.append("")
+    dims = kg.get("dimensions_affecting", {})
+    if dims:
+        lines.append("  Dimensions affecting metrics:")
+        for metric, d_list in dims.items():
+            lines.append(f"    {metric}: {', '.join(d_list)}")
+    hyps = kg.get("hypotheses", [])
+    if hyps:
+        lines.append("")
+        lines.append("  Diagnostic hypotheses:")
+        for h in hyps:
+            lines.append(f"    - {h}")
+    return "\n".join(lines)
 
 
 class KnowledgeGraph:

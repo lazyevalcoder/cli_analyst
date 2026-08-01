@@ -2,6 +2,7 @@ import pandas as pd
 
 from src.analyst import llm
 from src.analyst import prompts
+from src.analyst.graph import format_diagnostic_kg, format_structural_kg
 
 
 def load_csv(path: str) -> pd.DataFrame:
@@ -102,40 +103,6 @@ def build_diagnostic_kg(structural_kg: dict) -> dict:
     return validated
 
 
-def format_structural_kg(kg: dict) -> str:
-    lines = ["=== Structural Knowledge Graph ===", ""]
-    for node in kg.get("nodes", []):
-        lines.append(f"  [{node.get('type', '?').upper()}] {node.get('label', node.get('id', '?'))}")
-    lines.append("")
-    for edge in kg.get("edges", []):
-        src = edge.get("source", "?")
-        rel = edge.get("relation", "?")
-        tgt = edge.get("target", "?")
-        lines.append(f"  {src} --{rel}--> {tgt}")
-    return "\n".join(lines)
-
-
-def format_diagnostic_kg(kg: dict) -> str:
-    lines = ["=== Diagnostic Knowledge Graph ===", ""]
-    for chain in kg.get("chains", []):
-        path_str = " -> ".join(chain.get("path", []))
-        lines.append(f"  {chain.get('metric', '?')}: {path_str}")
-        lines.append(f"    {chain.get('explanation', '')}")
-        lines.append("")
-    dims = kg.get("dimensions_affecting", {})
-    if dims:
-        lines.append("  Dimensions affecting metrics:")
-        for metric, d_list in dims.items():
-            lines.append(f"    {metric}: {', '.join(d_list)}")
-    hyps = kg.get("hypotheses", [])
-    if hyps:
-        lines.append("")
-        lines.append("  Diagnostic hypotheses:")
-        for h in hyps:
-            lines.append(f"    - {h}")
-    return "\n".join(lines)
-
-
 def build_llm_context(structural_kg: dict, diagnostic_kg: dict) -> str:
     return (
         "=== STRUCTURAL KNOWLEDGE GRAPH (what exists in the data) ===\n"
@@ -204,6 +171,43 @@ def identify_priorities(schema: str, structural_kg: dict, diagnostic_kg: dict) -
     if not priorities:
         return []
     return priorities
+
+
+def format_priority_metric_brief(pri: dict, diagnostic_kg: dict = None) -> str:
+    """Render a priority's KPIs + supporting metrics (with DKG drill-down dimensions) as a prompt brief."""
+    from src.analyst.graph import _slugify
+    eqs = pri.get("executive_questions", [])
+    if not eqs:
+        return ""
+    dims = diagnostic_kg.get("dimensions_affecting", {}) if isinstance(diagnostic_kg, dict) else {}
+    dims_lower = {str(k).lower(): v for k, v in dims.items()}
+
+    def drill_dims(metric_name: str, source_col: str) -> list:
+        for key in (str(metric_name).lower(), _slugify(metric_name), str(source_col).lower(), _slugify(source_col)):
+            if key in dims_lower:
+                return dims_lower[key]
+        return []
+
+    lines = [f"PRIORITY: {pri.get('name', '')}", ""]
+    for i, eq in enumerate(eqs, 1):
+        lines.append(f"EXECUTIVE QUESTION {i}: {eq.get('question', '?')}")
+        for k in eq.get("kpis", []):
+            col = k.get("metric", "")
+            lines.append(f"  KPI: {k.get('name', '?')} (source: {col})")
+            if k.get("measurement"):
+                lines.append(f"    Measurement: {k.get('measurement', '')}")
+            dd = drill_dims(k.get("name", ""), col)
+            if dd:
+                lines.append(f"    Drill-down dimensions (from DKG): {', '.join(dd)}")
+        for s in eq.get("supporting_metrics", []):
+            col = s.get("metric", "")
+            inf = s.get("influences", [])
+            inf_str = f" [influences: {', '.join(inf)}]" if inf else ""
+            lines.append(f"  SUPPORTING: {s.get('name', '?')} (source: {col}){inf_str}")
+            if s.get("measurement"):
+                lines.append(f"    Measurement: {s.get('measurement', '')}")
+        lines.append("")
+    return "\n".join(lines).rstrip()
 
 
 def generate_briefing(schema: str, structural_kg: dict, diagnostic_kg: dict, priorities: list) -> dict:

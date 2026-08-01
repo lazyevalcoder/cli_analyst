@@ -7,10 +7,12 @@ Audit scope: Full user journey from entry to exit
 
 ## Stall Detection & Progress (user waits with no feedback)
 
+> **Progress note (2026-08):** Partially addressed since this audit. Phase 3 now prints a per-step line — `[Step N/M] (elapsed, ~ETA remain) Thinking...`, the executed code, and `OK/ERROR (duration)` with output — plus a checkpoint prompt at the free-step limit ("Continue for 5 more steps? (y/N)"). `priorities analyze` catches `KeyboardInterrupt` and saves progress gracefully. S2/S3 below remain open for general `analyze` (non-priority) runs.
+
 | # | Issue | Severity | Location |
 |---|-------|----------|----------|
 | S1 | **`init` blocks silently for 30-90s** — the LLM call has no spinner, no dots, no progress message. Just "Building structural KG (LLM call)..." followed by silence. User thinks the program froze. | P0 | `do_init`, `build_structural_kg`, `build_diagnostic_kg` |
-| S2 | **`analyze` shows only `Thinking...` for 1-5+ minutes** — 10 iterations each with 1-3 LLM calls. No ETA, no per-step timing, no "step 3/10" progress bar. User has no idea if it's 10% done or 90%. | P0 | `agentic_answer` loop (analyzer.py) |
+| S2 | **`analyze` shows only `Thinking...` for 1-5+ minutes** — ~15 iterations each with 1-3 LLM calls. No ETA, no per-step timing, no "step 3/15" progress bar. User has no idea if it's 10% done or 90%. | P0 | `agentic_answer` loop (agent.py) |
 | S3 | **No way to cancel** — once `analyze` starts, Ctrl+C dumps a raw traceback and collapses the shell. No graceful abort that preserves partial findings. | P0 | Shell entry point |
 | S4 | **`follow` re-plans from scratch** — even "what about Region X?" does a full reasoning phase (30-60s delay). No fast-path for fact retrieval. | P1 | `reason_and_plan` |
 | S5 | **`load` has a brief spinner ("Loading...")** — this is actually OK for the brief file I/O, but if the CSV were 10M rows it would stall silently too. | P2 | `do_load` |

@@ -6,7 +6,7 @@ from src.analyst import llm
 from src.analyst import prompts
 from src.analyst import sandbox
 from src.analyst.config import CONFIG
-from src.analyst.graph import KnowledgeGraph
+from src.analyst.graph import KnowledgeGraph, format_diagnostic_kg, format_structural_kg
 
 
 def _format_custom_instructions(instructions: list[str]) -> str:
@@ -18,7 +18,7 @@ def _format_custom_instructions(instructions: list[str]) -> str:
     return "\n".join(lines)
 
 
-def reason_and_plan(question: str, schema: str, structural_kg: dict, diagnostic_kg: dict, reasoning_framework: str, context: list[dict] = None, custom_instructions: list[str] = None) -> tuple:
+def reason_and_plan(question: str, schema: str, structural_kg: dict, diagnostic_kg: dict, reasoning_framework: str, context: list[dict] = None, custom_instructions: list[str] = None, metric_brief: str = "") -> tuple:
     # Fast-path for follow-ups
     if context:
         clean_question = re.sub(r"[^a-z0-9 ]", "", question.lower()).strip()
@@ -61,6 +61,7 @@ def reason_and_plan(question: str, schema: str, structural_kg: dict, diagnostic_
         question=question,
         context_section=context_section,
         custom_instructions=_format_custom_instructions(custom_instructions or []),
+        metric_brief=metric_brief,
     )
 
     print("  [Phase 1] Reasoning about the question...", flush=True)
@@ -89,40 +90,6 @@ def reason_and_plan(question: str, schema: str, structural_kg: dict, diagnostic_
     return reasoning, plan, strategy, persona
 
 
-def format_structural_kg(kg: dict) -> str:
-    lines = ["=== Structural Knowledge Graph ===", ""]
-    for node in kg.get("nodes", []):
-        lines.append(f"  [{node.get('type', '?').upper()}] {node.get('label', node.get('id', '?'))}")
-    lines.append("")
-    for edge in kg.get("edges", []):
-        src = edge.get("source", "?")
-        rel = edge.get("relation", "?")
-        tgt = edge.get("target", "?")
-        lines.append(f"  {src} --{rel}--> {tgt}")
-    return "\n".join(lines)
-
-
-def format_diagnostic_kg(kg: dict) -> str:
-    lines = ["=== Diagnostic Knowledge Graph ===", ""]
-    for chain in kg.get("chains", []):
-        path_str = " -> ".join(chain.get("path", []))
-        lines.append(f"  {chain.get('metric', '?')}: {path_str}")
-        lines.append(f"    {chain.get('explanation', '')}")
-        lines.append("")
-    dims = kg.get("dimensions_affecting", {})
-    if dims:
-        lines.append("  Dimensions affecting metrics:")
-        for metric, d_list in dims.items():
-            lines.append(f"    {metric}: {', '.join(d_list)}")
-    hyps = kg.get("hypotheses", [])
-    if hyps:
-        lines.append("")
-        lines.append("  Diagnostic hypotheses:")
-        for h in hyps:
-            lines.append(f"    - {h}")
-    return "\n".join(lines)
-
-
 def build_step_summary(analysis_state: list[dict]) -> str:
     if not analysis_state:
         return ""
@@ -139,8 +106,8 @@ def build_step_summary(analysis_state: list[dict]) -> str:
     return "\n".join(lines)
 
 
-def agentic_answer(question: str, df, schema: str, structural_kg: dict, diagnostic_kg: dict, reasoning_framework: str, context: list[dict] = None, custom_instructions: list[str] = None, graph: KnowledgeGraph = None) -> str:
-    reasoning, plan, strategy, persona = reason_and_plan(question, schema, structural_kg, diagnostic_kg, reasoning_framework, context=context, custom_instructions=custom_instructions)
+def agentic_answer(question: str, df, schema: str, structural_kg: dict, diagnostic_kg: dict, reasoning_framework: str, context: list[dict] = None, custom_instructions: list[str] = None, graph: KnowledgeGraph = None, metric_brief: str = "") -> str:
+    reasoning, plan, strategy, persona = reason_and_plan(question, schema, structural_kg, diagnostic_kg, reasoning_framework, context=context, custom_instructions=custom_instructions, metric_brief=metric_brief)
 
     print("\n  [Phase 1] Reasoning:")
     if strategy:
@@ -164,6 +131,23 @@ def agentic_answer(question: str, df, schema: str, structural_kg: dict, diagnost
         context_section = "\n".join(lines)
 
     custom_instructions_str = _format_custom_instructions(custom_instructions or [])
+    metric_brief_str = ""
+    if metric_brief:
+        metric_brief_str = f"""
+
+METRIC BRIEF — these are the pre-defined KPIs and supporting metrics to compute for this priority:
+{metric_brief}
+
+TWO-PHASE EXECUTION:
+PHASE 1 — METRICS: Compute EVERY KPI in the brief (current value + delta vs prior period) using the exact Measurement formula and EXACT column names. Also compute its supporting metrics. Use lookup_metric for any metric definition.
+PHASE 2 — DIMENSION DRILL-DOWN (only when it makes sense): For any KPI that is OFF (declining, below trend, anomalous, negative delta), slice it by its Drill-down dimensions to locate WHERE the issue originates (e.g., which product / agent / region / stage / account). Apply the appropriate analytical lens (decomposition, mix shift, variance). Healthy or stable KPIs skip the drill-down. Do NOT invent drill-down dimensions beyond those listed.
+OUTPUT FORMAT (structured per-KPI insight):
+  Q<n>: <question>
+    KPI <name>: <value>, <delta vs prior> → <business read>
+      Driver: <supporting metric> explains <...>
+      Implication: <...>
+      [If KPI is off] By <dimension>: <where the issue originates> → <why>
+"""
     system = f"""You are a data analyst investigating a question about data.
 
 COLUMN NAMES AND TYPES:
@@ -190,7 +174,7 @@ If a step fails, analyze the error and try a corrected version.
 
 METRIC CATALOG: Use lookup_metric to retrieve precise formulas for any KPI or metric mentioned in the question. Do NOT guess formulas — look them up.
 
-KNOWLEDGE GRAPH: Use traverse_graph to explore relationships between metrics, dimensions, and business goals. This helps you understand what influences a metric, what it depends on, and how it connects to other business concepts."""
+KNOWLEDGE GRAPH: Use traverse_graph to explore relationships between metrics, dimensions, and business goals. This helps you understand what influences a metric, what it depends on, and how it connects to other business concepts.""" + metric_brief_str
 
     strategy_section = prompts.extract_strategy_section(strategy)
     strategy_guide = f"\n\nSTRATEGY GUIDE:\n{strategy_section}" if strategy_section else ""
@@ -221,12 +205,16 @@ Begin your analysis. Execute the first step of your plan."""
 
     _ns = sandbox._make_namespace(df)
 
-    for iteration in range(CONFIG.max_iterations):
+    limit = CONFIG.max_iterations
+    iteration = 0
+    declined = False
+
+    while iteration < limit:
         _step_start = time.time()
         total_elapsed = _step_start - _loop_start
         avg = total_elapsed / (iteration + 1)
-        remaining = avg * (CONFIG.max_iterations - iteration - 1)
-        print(f"  [Step {iteration + 1}/{CONFIG.max_iterations}] ({total_elapsed:.0f}s elapsed, ~{remaining:.0f}s remain) Thinking...", flush=True)
+        remaining = avg * (limit - iteration - 1)
+        print(f"  [Step {iteration + 1}/{limit}] ({total_elapsed:.0f}s elapsed, ~{remaining:.0f}s remain) Thinking...", flush=True)
 
         state_summary = build_step_summary(analysis_state)
         if state_summary:
@@ -272,7 +260,10 @@ Begin your analysis. Execute the first step of your plan."""
                     analysis_state.append({"step": iteration + 1, "success": success, "output": output})
 
                     if success:
-                        result = f"Step {iteration + 1} completed successfully.\nOutput:\n{output}\n\nAll variables and df columns you created are available for future steps."
+                        out_display = output
+                        if len(out_display) > CONFIG.max_output_chars:
+                            out_display = out_display[:CONFIG.max_output_chars] + f"\n... [output truncated to {CONFIG.max_output_chars} chars]"
+                        result = f"Step {iteration + 1} completed successfully.\nOutput:\n{out_display}\n\nAll variables and df columns you created are available for future steps."
                     else:
                         _ns["df"] = df_before
                         result = f"Step {iteration + 1} FAILED with error:\n{output}\n\nThe DataFrame has been restored to its state before this failed step. Your code may have corrupted it. Try a different approach."
@@ -309,14 +300,36 @@ Begin your analysis. Execute the first step of your plan."""
                     prompt = "You MUST call execute_code or final_answer. Do NOT send text without a tool call."
                 else:
                     prompt = "Continue. Use execute_code or final_answer."
-                if iteration < CONFIG.max_iterations - 1:
+                if iteration < limit - 1:
                     messages.append({"role": "user", "content": prompt})
 
-    print("\n  [Phase 4] Requesting final answer (max iterations reached)...")
+        iteration += 1
+
+        if iteration == limit and iteration >= CONFIG.max_iterations:
+            last_summary = build_step_summary(analysis_state)
+            print(f"\n  === Checkpoint: {iteration} steps completed ===")
+            if last_summary:
+                print(f"  {last_summary.replace(chr(10), chr(10) + '  ')[:400]}")
+            try:
+                ans = input(f"  Continue for {CONFIG.continuation_block} more steps? (y/N): ").strip().lower()
+            except EOFError:
+                ans = "n"
+            if ans in ("y", "yes"):
+                limit += CONFIG.continuation_block
+                messages.append({
+                    "role": "user",
+                    "content": f"User approved {CONFIG.continuation_block} additional steps. You have {CONFIG.continuation_block} more steps of budget — keep investigating; do NOT wrap up yet.",
+                })
+            else:
+                declined = True
+                break
+
+    reason = "you declined to continue" if declined else "the step budget was reached"
+    print(f"\n  [Phase 4] Requesting final answer ({reason})...")
     state_summary = build_step_summary(analysis_state)
     messages.append({
         "role": "user",
-        "content": f"""You have completed {CONFIG.max_iterations} steps of analysis.
+        "content": f"""You have completed {limit} steps of analysis ({reason}).
 You MUST now provide your final answer using the final_answer tool.
 
 {state_summary}
@@ -329,16 +342,27 @@ Call final_answer NOW."""
     for attempt in range(3):
         msg = llm.chat_with_tools(messages, temperature=0.4)
         if msg.tool_calls:
+            messages.append(msg)
             for tool_call in msg.tool_calls:
                 fn_name = tool_call.function.name
-                args = json.loads(tool_call.function.arguments)
+                try:
+                    args = json.loads(tool_call.function.arguments)
+                except json.JSONDecodeError:
+                    continue
                 if fn_name == "final_answer":
                     return args.get("answer", "(no answer)")
+                if fn_name == "execute_code":
+                    code = args.get("code", "")
+                    success, output = sandbox.execute_in_namespace(code, _ns)
+                    if len(output) > CONFIG.max_output_chars:
+                        output = output[:CONFIG.max_output_chars] + f"\n... [output truncated to {CONFIG.max_output_chars} chars]"
+                    result = f"Step (final synthesis): {'OK' if success else 'ERROR'}\n{output}"
+                    messages.append({"role": "tool", "tool_call_id": tool_call.id, "content": result})
         if attempt < 2:
             messages.append({"role": "user", "content": "Please provide your final answer using final_answer tool now."})
 
     successful_results = [e for e in analysis_state if e["success"]]
     if successful_results:
-        summary = "\n".join(f"Step {e['step']}: {e['output'][:200]}" for e in successful_results)
+        summary = "\n\n".join(f"Step {e['step']}:\n{e['output']}" for e in successful_results)
         return f"Analysis completed with {len(successful_results)} successful steps:\n\n{summary}"
     return "(Analysis completed but could not generate final answer)"

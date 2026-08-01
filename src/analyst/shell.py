@@ -1,5 +1,4 @@
 import cmd
-import re
 import shlex
 import shutil
 import time
@@ -13,12 +12,12 @@ from src.analyst import builder
 from src.analyst import llm
 from src.analyst import viewer
 from src.analyst.config import CONFIG
-from src.analyst.graph import KnowledgeGraph
+from src.analyst.graph import KnowledgeGraph, _slugify
 from src.analyst.storage import append_jsonl, read_jsonl, save_json
 
 
 def _make_slug(text: str) -> str:
-    slug = re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")
+    slug = _slugify(text, sep="-")
     return slug[:60] or "analysis"
 
 
@@ -570,6 +569,7 @@ class AnalystShell(cmd.Cmd):
             analysis_dir.mkdir(parents=True, exist_ok=True)
 
             schema_str = builder.extract_schema(self.df)
+            metric_brief = builder.format_priority_metric_brief(pri, self.project.diagnostic_kg)
             print(f"\n  Running analysis on priority [{pname}]...\n")
 
             try:
@@ -583,6 +583,7 @@ class AnalystShell(cmd.Cmd):
                     context=None,
                     custom_instructions=self.project.custom_instructions,
                     graph=self._catalog,
+                    metric_brief=metric_brief,
                 )
             except KeyboardInterrupt:
                 self.project.save()

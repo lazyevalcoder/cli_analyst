@@ -1,10 +1,11 @@
 import ast
 import builtins
-import concurrent.futures
-import io
 import json
-import traceback
-from contextlib import redirect_stdout
+import pickle
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
 
 import pandas as pd
 
@@ -59,6 +60,10 @@ PANDAS_EXEC_METHODS = {"eval", "query", "exec"}
 
 FORBIDDEN_AST_NODES = (ast.Import, ast.ImportFrom)
 
+_SKIP = {"pd", "json", "np"}
+
+_WORKER = Path(__file__).with_name("sandbox_worker.py")
+
 
 def _check_ast_safe(tree: ast.AST) -> str | None:
     for node in ast.walk(tree):
@@ -91,7 +96,7 @@ def _check_ast_safe(tree: ast.AST) -> str | None:
 
 def execute_code(code: str, df: pd.DataFrame) -> tuple[bool, str]:
     namespace = _make_namespace(df)
-    return _execute_internal(code, namespace, df)
+    return _execute_internal(code, namespace)
 
 
 def execute_in_namespace(code: str, namespace: dict) -> tuple[bool, str]:
@@ -108,6 +113,17 @@ def _make_namespace(df: pd.DataFrame) -> dict:
     return ns
 
 
+def _picklable_state(namespace: dict) -> dict:
+    return {k: v for k, v in namespace.items() if k not in _SKIP}
+
+
+def _restore_namespace(namespace: dict, loaded: dict) -> None:
+    modules = {k: namespace[k] for k in _SKIP if k in namespace}
+    namespace.clear()
+    namespace.update(loaded)
+    namespace.update(modules)
+
+
 def _execute_internal(code: str, namespace: dict, df: pd.DataFrame = None) -> tuple[bool, str]:
     for keyword in BLOCKED_SUBSTRINGS:
         if keyword in code:
@@ -122,25 +138,36 @@ def _execute_internal(code: str, namespace: dict, df: pd.DataFrame = None) -> tu
     if msg:
         return False, f"Blocked: {msg}"
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-        future = executor.submit(_run_code, code, SAFE_BUILTINS, namespace)
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        code_path = tmp / "code.py"
+        state_path = tmp / "state.pkl"
+        out_path = tmp / "out.pkl"
+        code_path.write_text(code, encoding="utf-8")
+        with open(state_path, "wb") as f:
+            pickle.dump(_picklable_state(namespace), f)
+
         try:
-            output, error = future.result(timeout=CONFIG.timeout_seconds)
-        except concurrent.futures.TimeoutError:
+            result = subprocess.run(
+                [sys.executable, str(_WORKER), str(code_path), str(state_path), str(out_path)],
+                capture_output=True,
+                text=True,
+                timeout=CONFIG.timeout_seconds,
+            )
+        except subprocess.TimeoutExpired:
             return False, f"Code execution timed out after {CONFIG.timeout_seconds} seconds"
 
-    if error:
-        return False, error
-    if not output.strip():
-        return True, "(no output)"
-    return True, output
+        if out_path.exists():
+            try:
+                with open(out_path, "rb") as f:
+                    loaded = pickle.load(f)
+                _restore_namespace(namespace, loaded)
+            except Exception:
+                pass
 
-
-def _run_code(code: str, safe_builtins: dict, namespace: dict) -> tuple[str, str]:
-    stdout_capture = io.StringIO()
-    try:
-        with redirect_stdout(stdout_capture):
-            exec(code, {"__builtins__": safe_builtins}, namespace)
-        return stdout_capture.getvalue(), ""
-    except Exception:
-        return "", traceback.format_exc()
+        if result.returncode != 0:
+            return False, (result.stderr or "worker error").strip()
+        output = result.stdout or ""
+        if not output.strip():
+            return True, "(no output)"
+        return True, output

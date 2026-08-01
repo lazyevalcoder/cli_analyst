@@ -57,11 +57,14 @@ User asks question (analyze) or runs priority analysis (priorities analyze <n>)
        ↓
 [Phase 2: PLAN] LLM creates 3-5 step execution plan
        ↓
-[Phase 3: EXECUTE] Run the plan (up to 10 iterations)
+[Phase 3: EXECUTE] Run the plan (free steps, default 15, with user-approved continuation at checkpoints)
   - Each code block is self-contained (fresh namespace per call)
   - LLM receives explicit success/failure feedback
   - LLM can adapt plan based on findings
   - Tool calls forced via tool_choice="required"
+  - Progress line per step: elapsed time, ETA, running code
+  - Checkpoint at the free-step limit: "Continue for 5 more steps? (y/N)"
+  - Tool-result stdout truncated at 3,000 chars for the LLM context (full output kept in state)
        ↓
 [Phase 4: SYNTHESIZE] Final answer (saved as analysis turn)
        ↓
@@ -132,7 +135,7 @@ After `init`, a unified `knowledge_graph.json` is built by merging the Structura
 | `init` | Build KGs + reasoning framework + auto-identify priorities |
 | `priorities` | Show strategic business priorities with executive questions |
 | `priorities regenerate` | Re-identify priorities (executive questions + KPIs + metrics) from schema + KGs |
-| `priorities analyze <n>` | Run full 4-phase analysis on a priority (includes executive questions) |
+| `priorities analyze <n>` | Run full analysis on a priority (metric-driven: computes pre-defined KPIs + supporting metrics, drills into dimensions only for OFF KPIs) |
 | `priorities show <n>` | Show executive questions, KPIs, metrics, and saved analysis for a priority |
 | `briefing [regenerate]` | Show strategic briefing organized per priority |
 | `instructions` | List custom analysis instructions |
@@ -175,25 +178,33 @@ A: Northeast sales fell 22% in Q4. The Furniture category declined 35%...
 
 ```
 Jul25/
-├── main.py                           # CLI entry point (interactive menu or init|open|list)
-├── shell.py                          # Interactive shell (cmd.Cmd)
-├── analyzer.py                       # Schema, KGs, reasoning framework, agentic loop
-├── llm_client.py                     # OpenAI SDK wrapper (llama.cpp) + tool calling
-├── knowledge_graph.py                # Unified graph: metric catalog + KG nodes/edges + traversal
-├── sandbox.py                        # Safe Python execution (concurrent.futures, AST checks)
-├── config.py                         # Centralized configuration (dataclass + env vars)
-├── project.py                        # Project management (init, open, save, load)
-├── storage.py                        # JSON persistence (save/load/append-jsonl)
-├── knowledge/
-│   ├── reasoning_framework.md        # Analysis strategies, personas, heuristics
-│   ├── reasoning_prompt.md           # Phase 1 reasoning prompt template
-│   ├── structural_kg_prompt.md       # Structural KG creation prompt
-│   ├── diagnostic_kg_prompt.md       # Diagnostic KG creation prompt
-│   ├── reasoning_context_prompt.md   # Dataset-specific context prompt
-│   ├── priorities_prompt.md          # Strategic priority extraction prompt
-│   └── briefing_prompt.md            # Per-priority strategic briefing prompt
-├── requirements.txt                  # Dependencies
-└── Idea.txt                          # Original project idea
+├── main.py                           # Thin entry point → src.analyst.__main__.main
+├── serve_viewer.py                   # Standalone web viewer server
+├── pyproject.toml                    # Packaging + dependencies (openai, pandas, numpy)
+├── src/analyst/
+│   ├── __main__.py                   # CLI entry point (interactive menu or init|open|list); `analyst` script
+│   ├── shell.py                      # Interactive shell (cmd.Cmd)
+│   ├── agent.py                      # Agentic 4-phase loop + KG formatters
+│   ├── builder.py                    # Schema, KGs, reasoning framework, priorities, briefing
+│   ├── llm.py                        # OpenAI SDK wrapper (llama.cpp) + tool calling
+│   ├── graph.py                      # Unified graph: metric catalog + KG nodes/edges + traversal
+│   ├── sandbox.py                    # Safe Python execution (subprocess, AST checks)
+│   ├── config.py                     # Centralized configuration (dataclass + env vars)
+│   ├── project.py                    # Project management (init, open, save, load)
+│   ├── storage.py                    # JSON persistence (save/load/append-jsonl)
+│   ├── prompts.py                    # Prompt loading + formatting helpers
+│   ├── viewer.py                     # Embedded analysis viewer (HTTP server)
+│   ├── viewer.html                   # Viewer frontend
+│   └── prompts/
+│       ├── reasoning_framework.md    # Analysis strategies, personas, heuristics
+│       ├── reasoning_prompt.md       # Phase 1 reasoning prompt template
+│       ├── structural_kg_prompt.md   # Structural KG creation prompt
+│       ├── diagnostic_kg_prompt.md   # Diagnostic KG creation prompt
+│       ├── reasoning_context_prompt.md  # Dataset-specific context prompt
+│       ├── priorities_prompt.md      # Strategic priority extraction prompt
+│       └── briefing_prompt.md        # Per-priority strategic briefing prompt
+├── docs/                             # Concepts, reviews, design docs
+└── scratch/                          # Scratch notes (incl. original idea)
 ```
 
 ## Chain-of-Thought Architecture
@@ -233,7 +244,7 @@ LLM combines all findings into a comprehensive answer using temperature 0.4.
 
 ## Prompt Architecture
 
-All prompts are externalized to `knowledge/*.md` files and loaded at runtime.
+All prompts are externalized to `src/analyst/prompts/*.md` files and loaded at runtime.
 This enables iteration on prompts without code changes.
 
 | File | Used For |
@@ -251,7 +262,7 @@ After Phase 1 selects a strategy (e.g., "Diagnostic Analysis"), only that strate
 
 ## Reasoning Framework
 
-The `knowledge/reasoning_framework.md` file provides:
+The `src/analyst/prompts/reasoning_framework.md` file provides:
 
 ### Analysis Strategies
 - **Trend Analysis**: Time-based patterns, growth, decline
@@ -306,9 +317,9 @@ Priorities and their executive questions are MECE (Mutually Exclusive, Collectiv
 
 When the LLM needs a precise formula during analysis, it calls the `lookup_metric` tool on-demand rather than having every definition injected into the prompt. The catalog supports user overrides — edit a formula and the LLM will use your version going forward.
 
-The metric catalog is built on a **knowledge graph** data model (`knowledge_graph.py`): typed nodes (kpi, supporting_metric, entity, dimension, executive_question) and typed edges (INFLUENCES, DERIVED_FROM, SUPPORTS). The LLM can use the `traverse_graph` tool to explore these relationships, enabling root-cause analysis and impact analysis without the full graph in its context window.
+The metric catalog is built on a **knowledge graph** data model (`graph.py`): typed nodes (kpi, supporting_metric, entity, dimension, executive_question) and typed edges (INFLUENCES, DERIVED_FROM, SUPPORTS). The LLM can use the `traverse_graph` tool to explore these relationships, enabling root-cause analysis and impact analysis without the full graph in its context window.
 
-Priorities can be analyzed on-demand. Each priority analysis runs through the same 4-phase pipeline as a user question. Results are saved as analysis turns under `analyses/_priority-<name>/` and linked back to the priority.
+Priorities can be analyzed on-demand. Each priority analysis is **metric-driven**: it computes every pre-defined KPI (with its exact measurement formula) plus supporting metrics, then drills down into dimensions only for KPIs that are OFF (declining, anomalous, negative delta). Drill-down dimensions come from the Diagnostic KG (`dimensions_affecting`), not invented by the LLM. Results are saved as analysis turns under `analyses/_priority-<name>/` and linked back to the priority.
 
 After analysis, `priorities` shows a `✓ Analyzed` marker. Use `review <slug>` for the full turn history.
 
@@ -342,7 +353,8 @@ Improvements for small models (7B-13B, 4K-8K context):
 | No JSON example | 1-shot example in `reasoning_prompt.md` |
 | Prompts waste context | KGs and framework stripped from Phase 3 system prompt |
 | Independence rule ignored | Reminder injected after each successful execution |
-| Context overflow | State summary truncated to last 2 steps, 200 chars each |
+| Context overflow | State summary truncated to last 2 steps, 200 chars each; tool-result stdout capped at `max_output_chars` (default 3000) |
+| Runaway loops | Checkpoints: after `max_iterations` (default 15), user approves continuation in `continuation_block` (default 5) chunks |
 | One temperature fits all | 0.1 for JSON, 0.2 for code, 0.4 for synthesis |
 | Malformed JSON crashes | `ask_json` retries 2x with sharper instruction |
 | Tool args malformed | try/except with error feedback back to LLM |
@@ -355,7 +367,7 @@ Improvements for small models (7B-13B, 4K-8K context):
 
 ### Install Dependencies
 ```bash
-pip install -r requirements.txt
+pip install -e .
 ```
 
 ### Run
@@ -381,7 +393,7 @@ The LLM has access to four tools:
 
 ### Adding More Tools
 
-Edit `TOOLS` list in `llm_client.py`, then handle the tool in `analyzer.py`'s `agentic_answer()` function.
+Edit `TOOLS` list in `llm.py`, then handle the tool in `agent.py`'s `agentic_answer()` function.
 
 ## Knowledge Graphs
 
@@ -408,7 +420,7 @@ Sandbox provides defense-in-depth:
 - **AST analysis**: Detects forbidden imports, dangerous attributes (`__class__`, `__builtins__`), dangerous calls (`exec`, `eval`, `compile`, `open`), pandas exec methods
 - **Restricted builtins**: Allow-list of 30 safe builtins only
 - **Denied attributes**: Python internals blocklist
-- **Timeout**: 30-second hard limit via `concurrent.futures.ThreadPoolExecutor`
+- **Timeout**: 30-second hard limit via `subprocess.run(timeout=...)` — process is killed on timeout
 - **Isolated namespace**: Only `df`, `pd`, `json`, optionally `np`
 - **Data protection**: DataFrame is deep-copied per call to prevent cross-step mutation
 
@@ -419,7 +431,9 @@ All settings centralized in `config.py` with environment variable overrides:
 ```python
 CONFIG.base_url        # LLM endpoint (env: LLM_BASE_URL, default: http://localhost:8080/v1)
 CONFIG.model           # Model name (env: LLM_MODEL, default: local)
-CONFIG.max_iterations  # Max Phase 3 iterations (env: MAX_ITERATIONS, default: 10)
+CONFIG.max_iterations  # Free Phase 3 iterations before checkpointing (env: MAX_ITERATIONS, default: 15)
+CONFIG.continuation_block # Extra steps granted per user approval at checkpoints (env: CONTINUATION_BLOCK, default: 5)
+CONFIG.max_output_chars  # Tool-result stdout truncation cap for the LLM context (env: MAX_OUTPUT_CHARS, default: 3000)
 CONFIG.timeout_seconds # Code execution timeout (env: TIMEOUT_SECONDS, default: 30)
 CONFIG.max_retries     # LLM retry count (env: MAX_RETRIES, default: 3)
 CONFIG.retry_base_delay # Retry backoff base (env: RETRY_BASE_DELAY, default: 1.0)
@@ -436,9 +450,14 @@ CONFIG.temperature_synthesis  # Final answer synthesis (0.4)
 - [x] **Custom Analysis Instructions** — Persistent user-defined methodology rules injected into every analysis
 - [x] **Strategic Briefing** — Per-priority strategic overview generated from schema + KGs
 - [x] **Unified Knowledge Graph** — SKG, DKG, and metric catalog merged into a single traversable graph with typed relationships; LLM uses `traverse_graph` tool to explore causal chains, data lineage, and business connections on demand
+- [x] **Metric-Driven Priority Analysis** — `priorities analyze <n>` computes pre-defined KPIs + supporting metrics via exact measurement formulas, then drills into DKG-sourced dimensions only for OFF KPIs; structured per-KPI insights (value, delta, driver, implication, by-dimension)
+- [x] **Iteration Checkpoints** — after 15 free steps the agent asks whether to continue in blocks of 5, preventing runaway loops while keeping the LLM informed of its remaining budget
+- [x] **Context-Size Guard** — tool-result stdout is truncated at 3,000 chars for the LLM context (full output kept in analysis state); Phase-4 synthesis routes `execute_code` results back to the LLM and falls back to full step outputs instead of a 200-char cut
 
 ## Future Plans
 
+- [ ] **Three-tier priority analysis** (`compute` / `analyze` deep / `interpret` quick) — pre-compute scalar metric values into `metadata/priority_values.json`, seed the deep agentic loop with them, and add a single-call interpret tier. See `docs/concepts/priority-compute-analyze-three-tier-split.md`.
+- [ ] **Scorecard artifact** — dashboard-matrix data model (outcomes × dimension cells) with filter-keyed values; the roadmap in `docs/concepts/roadmap.md`. Requires the priorities-quality foundation (validator + blueprint + few-shot bank) first.
 - [ ] Update KGs with computed insights
 - [ ] Support multiple CSVs / joins
 - [ ] Web UI
