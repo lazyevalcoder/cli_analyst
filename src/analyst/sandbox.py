@@ -60,7 +60,7 @@ PANDAS_EXEC_METHODS = {"eval", "query", "exec"}
 
 FORBIDDEN_AST_NODES = (ast.Import, ast.ImportFrom)
 
-_SKIP = {"pd", "json", "np"}
+_SKIP = {"pd", "json", "np", "math"}
 
 _WORKER = Path(__file__).with_name("sandbox_worker.py")
 
@@ -108,6 +108,11 @@ def _make_namespace(df: pd.DataFrame) -> dict:
     try:
         import numpy as np
         ns["np"] = np
+    except ImportError:
+        pass
+    try:
+        import math
+        ns["math"] = math
     except ImportError:
         pass
     return ns

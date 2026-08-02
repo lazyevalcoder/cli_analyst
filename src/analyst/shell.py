@@ -484,15 +484,156 @@ class AnalystShell(cmd.Cmd):
         else:
             print(f"Unknown view: {sub}")
 
+    def _priority_values_record(self, pri: dict) -> dict:
+        pv = self.project.priority_values or {}
+        return pv.get("priorities", {}).get(pri.get("name", "")) or None
+
+    def _stored_period(self) -> dict:
+        """Reconstruct a period dict from the persisted machine-readable bounds."""
+        pv = self.project.priority_values or {}
+        p = pv.get("period") or {}
+        return {
+            "date_column": p.get("date_column"),
+            "current_start": p.get("current_start"),
+            "current_end": p.get("current_end"),
+            "prior_start": p.get("prior_start"),
+            "prior_end": p.get("prior_end"),
+            "definition_text": pv.get("period_definition", ""),
+        }
+
+    def _priority_values_are_current(self, pri: dict) -> bool:
+        rec = self._priority_values_record(pri)
+        if rec is None:
+            return False
+        if (self.project.priority_values or {}).get("engine_version") != builder.COMPUTE_ENGINE_VERSION:
+            return False
+        if rec.get("fingerprint") != builder.priority_fingerprint(pri):
+            return False
+        stored_fp = (self.project.priority_values or {}).get("data_fingerprint")
+        if stored_fp != builder.data_fingerprint(self.df):
+            return False
+        stored_names = set((rec.get("values") or {}))
+        current_names = {str(k.get("name", "")) for _, k in builder._iter_priority_metrics(pri) if k.get("name")}
+        if not current_names.issubset(stored_names):
+            return False
+        return True
+
+    def _ensure_priority_values(self, pri: dict) -> dict:
+        """Auto-compute stored values if missing or stale (def fingerprint or data fingerprint).
+
+        Resumes a partial run: already-recorded metrics (final status) are kept and only
+        missing ones are computed. Persists after each executive question so Ctrl+C keeps
+        completed questions.
+        """
+        if self._priority_values_are_current(pri):
+            return self._priority_values_record(pri)
+        pname = pri.get("name", "")
+        print(f"  Computing metric values for [{pname}]...")
+        print("  (This makes a few LLM calls and can take a few minutes. "
+              f"Each LLM call times out after {CONFIG.llm_timeout_seconds}s if the model hangs.)", flush=True)
+        schema_str = builder.extract_schema(self.df)
+
+        existing = None
+        rec = self._priority_values_record(pri)
+        pv = self.project.priority_values or {}
+        base_current = (
+            rec is not None
+            and pv.get("engine_version") == builder.COMPUTE_ENGINE_VERSION
+            and rec.get("fingerprint") == builder.priority_fingerprint(pri)
+            and pv.get("data_fingerprint") == builder.data_fingerprint(self.df)
+        )
+        if base_current:
+            existing = rec.get("values") or {}
+
+        def persist(result: dict):
+            merged = dict(self.project.priority_values or {})
+            merged["generated_at"] = result.get("generated_at")
+            merged["data_fingerprint"] = result.get("data_fingerprint")
+            merged["engine_version"] = result.get("engine_version")
+            merged["period_definition"] = result.get("period_definition")
+            merged["period"] = result.get("period")
+            merged.setdefault("priorities", {}).update(result.get("priorities", {}))
+            self.project.priority_values = merged
+            self.project.save()
+
+        result = builder.compute_priority_values(pri, self.df, schema_str,
+                                                 existing=existing, on_progress=persist)
+        persist(result)
+        print(f"  Stored {len(result.get('priorities', {}).get(pname, {}).get('values', {}))} metric values.")
+        return result["priorities"].get(pname, {})
+
+    def _print_priority_values(self, pri: dict):
+        rec = self._priority_values_record(pri)
+        if rec is None:
+            print("  No stored values. Use 'priorities compute <n>'.")
+            return
+        values = rec.get("values", {})
+        period = (self.project.priority_values or {}).get("period_definition", "")
+        print(f"\n  Stored values for [{pri.get('name', '')}]:")
+        if period:
+            print(f"  Period: {period}")
+        for mname, v in values.items():
+            value = v.get("value")
+            unit = v.get("unit", "")
+            status = v.get("status", "")
+            verified = "verified" if v.get("verified") else "UNVERIFIED"
+            basis = v.get("basis", "")
+            reason = v.get("reason", "")
+            print(f"    {mname}: {value} {unit}".rstrip())
+            print(f"      [{status} | {verified}]")
+            if basis:
+                print(f"      basis: {basis}")
+            if reason:
+                print(f"      reason: {reason}")
+
+    def _verify_priority_values(self, pri: dict) -> None:
+        """Run the full verification stack for a priority and persist the verdicts.
+
+        Layer 0 (plausibility) + Layer 1 (independent re-derivation) are deterministic
+        and always run; Layer 2 (LLM semantic check) runs because the subcommand is the
+        explicit request. Layer 2 can only unset `verified` / annotate — never set it.
+        """
+        rec = self._ensure_priority_values(pri)
+        pname = pri.get("name", "")
+        values = rec.get("values", {})
+        if not values:
+            print("  No stored values to verify.")
+            return
+        period = self._stored_period()
+        schema_str = builder.extract_schema(self.df)
+        print(f"  Verifying [{pname}]...")
+        values, lsum = builder._verify_layers(values, self.df, period)
+        print(builder._format_verify_summary(lsum))
+        values = builder.verify_priority_values(pri, self.df, values, period, schema_str)
+        checked = [v for v in values.values() if isinstance(v, dict) and v.get("status") == "computed"]
+        verified_n = sum(1 for v in checked if v.get("verified"))
+        llm_failed = [m for m, v in values.items()
+                      if isinstance(v, dict) and (v.get("verification") or {}).get("llm_ok") is False]
+        if llm_failed:
+            print(f"  L2 semantic check flagged {len(llm_failed)} metric(s): {', '.join(sorted(llm_failed))}")
+        self.project.priority_values = dict(self.project.priority_values or {})
+        self.project.priority_values.setdefault("priorities", {})[pname] = {
+            "priority_ref": pname,
+            "fingerprint": rec.get("fingerprint", builder.priority_fingerprint(pri)),
+            "values": values,
+        }
+        self.project.save()
+        print(f"  Verified {verified_n}/{len(checked)} computed metric(s). "
+              "Use 'priorities values <n>' to review per-metric verdicts.")
+
     def do_priorities(self, arg):
-        """priorities [regenerate|analyze|show] — Strategic priorities for this dataset
+        """priorities [regenerate|analyze|show|compute|verify|interpret|values] — Strategic priorities for this dataset
 
     Each priority contains 2-5 executive questions with KPIs and supporting metrics.
 
     Subcommands:
       priorities                           Show all priorities with executive questions
       priorities regenerate                Re-identify priorities from schema + KGs
-      priorities analyze <n>               Run full analysis on priority #n
+      priorities analyze <n>               Run full (deep) analysis on priority #n
+      priorities compute <n>               Resolve every metric to one scalar, persist values
+      priorities verify <n>                Plausibility + re-derivation + LLM semantic check
+      priorities interpret <n>             Quick one-call narration of stored values
+      priorities values <n>                Print stored computed values (audit aid)
       priorities show <n>                  Show executive questions, KPIs, metrics for priority #n
         """
         parts = arg.strip().split(maxsplit=1)
@@ -510,6 +651,7 @@ class AnalystShell(cmd.Cmd):
                 priorities = builder.identify_priorities(schema_str, self.project.structural_kg, self.project.diagnostic_kg)
                 if priorities:
                     self.project.priorities = priorities
+                    self.project.priority_values = {}
                     self.project.save()
                     self._catalog = KnowledgeGraph.build_from(priorities)
                     self._catalog.save(self.project.metric_catalog_path)
@@ -569,7 +711,12 @@ class AnalystShell(cmd.Cmd):
             analysis_dir.mkdir(parents=True, exist_ok=True)
 
             schema_str = builder.extract_schema(self.df)
-            metric_brief = builder.format_priority_metric_brief(pri, self.project.diagnostic_kg)
+            values_rec = self._ensure_priority_values(pri)
+            metric_brief = builder.format_priority_metric_brief(
+                pri,
+                self.project.diagnostic_kg,
+                values=(values_rec or {}).get("values") if values_rec else None,
+            )
             print(f"\n  Running analysis on priority [{pname}]...\n")
 
             try:
@@ -598,6 +745,126 @@ class AnalystShell(cmd.Cmd):
 
             print(f"\n  Priority [{pname}] analysis complete.")
             print(f"  Saved as '{slug}'. Use 'priorities show {idx+1}' or 'review {slug}' for details.\n")
+            return
+
+        # ----
+        # compute <n>
+        # ----
+        if sub == "compute":
+            if not self._require_data():
+                return
+            if not self.project.priorities:
+                print("  No priorities defined. Use 'priorities regenerate' first.")
+                return
+            if len(parts) < 2:
+                print("  Usage: priorities compute <number>")
+                print(f"  Priorities available: 1-{len(self.project.priorities)}")
+                return
+            try:
+                idx = int(parts[1]) - 1
+                if idx < 0 or idx >= len(self.project.priorities):
+                    print(f"  Invalid index. Use a number 1-{len(self.project.priorities)}.")
+                    return
+            except ValueError:
+                print("  Usage: priorities compute <number>")
+                return
+            pri = self.project.priorities[idx]
+            try:
+                self._ensure_priority_values(pri)
+            except KeyboardInterrupt:
+                self.project.save()
+                print("\n  Compute interrupted.")
+                return
+            self._print_priority_values(pri)
+            return
+
+        # ----
+        # verify <n>
+        # ----
+        if sub == "verify":
+            if not self._require_data():
+                return
+            if not self.project.priorities:
+                print("  No priorities defined. Use 'priorities regenerate' first.")
+                return
+            if len(parts) < 2:
+                print("  Usage: priorities verify <number>")
+                print(f"  Priorities available: 1-{len(self.project.priorities)}")
+                return
+            try:
+                idx = int(parts[1]) - 1
+                if idx < 0 or idx >= len(self.project.priorities):
+                    print(f"  Invalid index. Use a number 1-{len(self.project.priorities)}.")
+                    return
+            except ValueError:
+                print("  Usage: priorities verify <number>")
+                return
+            pri = self.project.priorities[idx]
+            self._verify_priority_values(pri)
+            return
+
+        # ----
+        # interpret <n>
+        # ----
+        if sub == "interpret":
+            if not self._require_data():
+                return
+            if not self.project.priorities:
+                print("  No priorities defined. Use 'priorities regenerate' first.")
+                return
+            if len(parts) < 2:
+                print("  Usage: priorities interpret <number>")
+                print(f"  Priorities available: 1-{len(self.project.priorities)}")
+                return
+            try:
+                idx = int(parts[1]) - 1
+                if idx < 0 or idx >= len(self.project.priorities):
+                    print(f"  Invalid index. Use a number 1-{len(self.project.priorities)}.")
+                    return
+            except ValueError:
+                print("  Usage: priorities interpret <number>")
+                return
+            pri = self.project.priorities[idx]
+            pname = pri.get("name", f"priority-{idx+1}")
+            try:
+                values_rec = self._ensure_priority_values(pri)
+            except KeyboardInterrupt:
+                self.project.save()
+                print("\n  Compute interrupted.")
+                return
+            values = (values_rec or {}).get("values", {}) if values_rec else {}
+            print(f"  Interpreting [{pname}]...")
+            try:
+                summary = builder.interpret_priority(pri, values)
+            except KeyboardInterrupt:
+                self.project.save()
+                print("\n  Interpret interrupted.")
+                return
+            pri["interpretation_summary"] = summary
+            pri["interpreted_at"] = datetime.now().isoformat(timespec="seconds")
+            self.project.save()
+            print(f"\n  {summary}\n")
+            return
+
+        # ----
+        # values <n>
+        # ----
+        if sub == "values":
+            if not self.project.priorities:
+                print("  No priorities defined.")
+                return
+            if len(parts) < 2:
+                print("  Usage: priorities values <number>")
+                return
+            try:
+                idx = int(parts[1]) - 1
+                if idx < 0 or idx >= len(self.project.priorities):
+                    print(f"  Invalid index. Use a number 1-{len(self.project.priorities)}.")
+                    return
+            except ValueError:
+                print("  Usage: priorities values <number>")
+                return
+            self._print_priority_values(self.project.priorities[idx])
             return
 
         # ----
@@ -695,6 +962,23 @@ class AnalystShell(cmd.Cmd):
 
                 if not kpis and not supporting:
                     print(f"\n  (Run 'priorities regenerate' for KPI-enriched view)")
+
+            rec = self._priority_values_record(pri)
+            if rec:
+                period = (self.project.priority_values or {}).get("period_definition", "")
+                values = rec.get("values", {})
+                print(f"\n  Computed values:")
+                if period:
+                    print(f"    Period: {period}")
+                for mname, v in values.items():
+                    status = v.get("status", "")
+                    verified = "verified" if v.get("verified") else "UNVERIFIED"
+                    print(f"    {mname}: {v.get('value')} {v.get('unit', '')} [{status} | {verified}]".rstrip())
+
+            interp = pri.get("interpretation_summary", "")
+            if interp:
+                print(f"\n  Interpretation summary:")
+                print(f"    {interp}")
 
             if summary:
                 print(f"\n  Analysis summary:")

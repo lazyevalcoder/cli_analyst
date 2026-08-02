@@ -20,9 +20,11 @@ Without arguments, you get an interactive prompt to create or open a project, th
 (analyst) load data/sales.csv
 (analyst) init
 (analyst) priorities regenerate           # AI identifies strategic priorities from KGs
+(analyst) priorities compute 1             # Resolve every metric of priority 1 to one scalar, persist
+(analyst) priorities interpret 1           # Quick one-call narration of stored values
 (analyst) metrics                          # List all KPIs and supporting metrics
 (analyst) metric show "Revenue Growth Trajectory"  # Full definition + formula
-(analyst) priorities analyze 2            # Run full analysis on a priority
+(analyst) priorities analyze 2            # Deep analysis (auto-computes values if stale, then seeded)
 (analyst) analyze "Why did sales decline in Q4?"
 (analyst) follow "What about the Northeast region specifically?"
 (analyst) instructions add "Always compare QoQ and YoY for time-based questions"
@@ -86,6 +88,7 @@ projects/
     │   ├── schema.json                 # Column info, types, samples
     │   ├── reasoning_framework.json    # Dataset-specific reasoning context
     │   ├── priorities.json             # Strategic business priorities
+    │   ├── priority_values.json        # Computed scalar metric values (three-tier compute)
     │   ├── custom_instructions.json    # User-defined analysis methodology
     │   ├── metric_catalog.json         # Metric definitions (backward-compat)
     │   ├── knowledge_graph.json        # Unified graph: nodes + edges from KGs + catalog
@@ -134,9 +137,12 @@ After `init`, a unified `knowledge_graph.json` is built by merging the Structura
 | `load <path>` | Load a CSV file, detect schema |
 | `init` | Build KGs + reasoning framework + auto-identify priorities |
 | `priorities` | Show strategic business priorities with executive questions |
-| `priorities regenerate` | Re-identify priorities (executive questions + KPIs + metrics) from schema + KGs |
-| `priorities analyze <n>` | Run full analysis on a priority (metric-driven: computes pre-defined KPIs + supporting metrics, drills into dimensions only for OFF KPIs) |
-| `priorities show <n>` | Show executive questions, KPIs, metrics, and saved analysis for a priority |
+| `priorities regenerate` | Re-identify priorities (executive questions + KPIs + metrics) from schema + KGs; clears stored computed values |
+| `priorities compute <n>` | Resolve every metric in priority n to ONE scalar value and persist to `metadata/priority_values.json` |
+| `priorities analyze <n>` | Run full analysis on a priority — auto-computes values if missing/stale, then deep-seeded: interprets pre-computed KPIs + supporting metrics, drills into dimensions only for OFF KPIs |
+| `priorities interpret <n>` | Quick one-LLM-call narration of stored values (value + unit, business read, OFF flags) |
+| `priorities values <n>` | Print stored computed values (value, unit, period, verified, status) — audit aid |
+| `priorities show <n>` | Show executive questions, KPIs, metrics, computed values, and saved analysis for a priority |
 | `briefing [regenerate]` | Show strategic briefing organized per priority |
 | `instructions` | List custom analysis instructions |
 | `instructions add "..."` | Add a methodology rule (saved per project) |
@@ -202,6 +208,9 @@ Jul25/
 │       ├── diagnostic_kg_prompt.md   # Diagnostic KG creation prompt
 │       ├── reasoning_context_prompt.md  # Dataset-specific context prompt
 │       ├── priorities_prompt.md      # Strategic priority extraction prompt
+│       ├── priority_period_prompt.md # Current-vs-prior period resolution
+│       ├── priority_spec_prompt.md   # Per-metric compute specs (compute tier)
+│       ├── interpret_priority_prompt.md # Quick interpret tier narration
 │       └── briefing_prompt.md        # Per-priority strategic briefing prompt
 ├── docs/                             # Concepts, reviews, design docs
 └── scratch/                          # Scratch notes (incl. original idea)
@@ -255,6 +264,9 @@ This enables iteration on prompts without code changes.
 | `reasoning_context_prompt.md` | Dataset-specific reasoning context |
 | `reasoning_framework.md` | Analysis strategies, personas, heuristics |
 | `priorities_prompt.md` | Strategic business priority extraction |
+| `priority_period_prompt.md` | Current-vs-prior period resolution (with machine-readable bounds) |
+| `priority_spec_prompt.md` | Per-metric compute specs (three-tier compute tier) |
+| `interpret_priority_prompt.md` | Quick one-call narration of stored values |
 | `briefing_prompt.md` | Per-priority strategic briefing generation |
 
 ### Strategy Extraction
@@ -306,8 +318,11 @@ Priorities and their executive questions are MECE (Mutually Exclusive, Collectiv
 | Command | What it does |
 |---------|-------------|
 | `priorities` | List priorities with their executive questions, KPIs, supporting metrics, and analysis status |
-| `priorities regenerate` | Re-run AI identification from schema + KGs |
-| `priorities analyze <n>` | Run the full 4-phase pipeline on a priority — generates real findings with code execution, saves the result linked to that priority |
+| `priorities regenerate` | Re-run AI identification from schema + KGs; clears stored computed values |
+| `priorities compute <n>` | Resolve every metric of priority n to ONE scalar value, persist to `metadata/priority_values.json` |
+| `priorities analyze <n>` | Run the full deep pipeline — auto-computes values if missing/stale, then seeded: interprets pre-computed metrics, drills into dimensions only for OFF KPIs |
+| `priorities interpret <n>` | Quick one-LLM-call narration of stored values |
+| `priorities values <n>` | Print stored computed values (audit aid) |
 | `priorities show <n>` | Display full detail — executive questions, KPIs (with formulas), supporting metrics, and any saved analysis |
 | `metrics` | List all metric definitions in the project catalog |
 | `metric show <name>` | View the full definition, including the LLM-lookupable formula |
@@ -358,6 +373,7 @@ Improvements for small models (7B-13B, 4K-8K context):
 | One temperature fits all | 0.1 for JSON, 0.2 for code, 0.4 for synthesis |
 | Malformed JSON crashes | `ask_json` retries 2x with sharper instruction |
 | Tool args malformed | try/except with error feedback back to LLM |
+| Long blocking LLM calls look frozen | Heartbeat on every blocking call — elapsed-time tick every 10s (no streaming) |
 
 ## Setup
 
@@ -456,7 +472,7 @@ CONFIG.temperature_synthesis  # Final answer synthesis (0.4)
 
 ## Future Plans
 
-- [ ] **Three-tier priority analysis** (`compute` / `analyze` deep / `interpret` quick) — pre-compute scalar metric values into `metadata/priority_values.json`, seed the deep agentic loop with them, and add a single-call interpret tier. See `docs/concepts/priority-compute-analyze-three-tier-split.md`.
+- [x] **Three-tier priority analysis** (`compute` / `analyze` deep / `interpret` quick) — pre-compute scalar metric values into `metadata/priority_values.json`, seed the deep agentic loop with them, and add a single-call interpret tier. Compute uses a spec + deterministic template (the LLM emits per-metric specs, a fixed `build_metric_script` template runs them — no LLM-written pandas). See `docs/concepts/priority-compute-analyze-three-tier-split.md`.
 - [ ] **Scorecard artifact** — dashboard-matrix data model (outcomes × dimension cells) with filter-keyed values; the roadmap in `docs/concepts/roadmap.md`. Requires the priorities-quality foundation (validator + blueprint + few-shot bank) first.
 - [ ] Update KGs with computed insights
 - [ ] Support multiple CSVs / joins

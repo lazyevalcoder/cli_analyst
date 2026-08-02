@@ -133,13 +133,24 @@ def agentic_answer(question: str, df, schema: str, structural_kg: dict, diagnost
     custom_instructions_str = _format_custom_instructions(custom_instructions or [])
     metric_brief_str = ""
     if metric_brief:
+        precomputed = "PRE-COMPUTED VALUES" in metric_brief
+        if precomputed:
+            phase1 = (
+                "PHASE 1 — METRICS: The brief includes PRE-COMPUTED VALUES for the KPIs and supporting metrics. "
+                "Interpret these values directly; do NOT recompute base metrics. Recompute (verify) a value once ONLY if it looks wrong. "
+                "Metrics whose status is 'not_computable' or 'error' (or absent from the values) MAY be computed once yourself — mark them 'recomputed in-loop' in your output."
+            )
+        else:
+            phase1 = (
+                "PHASE 1 — METRICS: Compute EVERY KPI in the brief (current value + delta vs prior period) using the exact Measurement formula and EXACT column names. Also compute its supporting metrics. Use lookup_metric for any metric definition."
+            )
         metric_brief_str = f"""
 
 METRIC BRIEF — these are the pre-defined KPIs and supporting metrics to compute for this priority:
 {metric_brief}
 
 TWO-PHASE EXECUTION:
-PHASE 1 — METRICS: Compute EVERY KPI in the brief (current value + delta vs prior period) using the exact Measurement formula and EXACT column names. Also compute its supporting metrics. Use lookup_metric for any metric definition.
+{phase1}
 PHASE 2 — DIMENSION DRILL-DOWN (only when it makes sense): For any KPI that is OFF (declining, below trend, anomalous, negative delta), slice it by its Drill-down dimensions to locate WHERE the issue originates (e.g., which product / agent / region / stage / account). Apply the appropriate analytical lens (decomposition, mix shift, variance). Healthy or stable KPIs skip the drill-down. Do NOT invent drill-down dimensions beyond those listed.
 OUTPUT FORMAT (structured per-KPI insight):
   Q<n>: <question>

@@ -27,6 +27,7 @@ class Project:
     current_analysis: Optional[str] = None
     reasoning_framework: str = ""
     priorities: list = field(default_factory=list)
+    priority_values: dict = field(default_factory=dict)
     custom_instructions: list[str] = field(default_factory=list)
     briefing_cache: dict = field(default_factory=dict)
 
@@ -51,6 +52,10 @@ class Project:
         return self.metadata_dir / "metric_catalog.json"
 
     @property
+    def priority_values_path(self) -> Path:
+        return self.metadata_dir / "priority_values.json"
+
+    @property
     def knowledge_graph_path(self) -> Path:
         return self.metadata_dir / "knowledge_graph.json"
 
@@ -64,6 +69,7 @@ class Project:
         save_json(self.metadata_dir / "schema.json", self.schema)
         save_json(self.metadata_dir / "reasoning_framework.json", {"text": self.reasoning_framework})
         save_json(self.metadata_dir / "priorities.json", self.priorities)
+        save_json(self.metadata_dir / "priority_values.json", self.priority_values)
         save_json(self.metadata_dir / "custom_instructions.json", self.custom_instructions)
         save_json(self.metadata_dir / "briefing.json", self.briefing_cache)
 
@@ -93,6 +99,7 @@ class Project:
                                        {"chains": [], "dimensions_affecting": {}, "hypotheses": []})
         self.reasoning_framework = load_json(self.metadata_dir / "reasoning_framework.json", {}).get("text", "")
         self.priorities = load_json(self.metadata_dir / "priorities.json", [])
+        self.priority_values = load_json(self.metadata_dir / "priority_values.json", {})
         self.custom_instructions = load_json(self.metadata_dir / "custom_instructions.json", [])
         self.briefing_cache = load_json(self.metadata_dir / "briefing.json", {})
 

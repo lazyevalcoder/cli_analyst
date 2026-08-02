@@ -1,10 +1,35 @@
 import json
 import re
+import threading
 import time
 
 from openai import OpenAI
 
 from src.analyst.config import CONFIG
+
+HEARTBEAT_INTERVAL = 10.0
+
+
+def _call_with_heartbeat(fn, label: str = "Waiting for model"):
+    """Run a blocking call while printing elapsed-time progress every few seconds.
+
+    Streaming adds complexity and resource overhead; a heartbeat gives the user a
+    regular "still working" signal during long LLM calls without changing the API.
+    """
+    stop = threading.Event()
+
+    def tick():
+        start = time.monotonic()
+        while not stop.wait(HEARTBEAT_INTERVAL):
+            print(f"    ...{label} ({time.monotonic() - start:.0f}s elapsed)", flush=True)
+
+    thread = threading.Thread(target=tick, daemon=True)
+    thread.start()
+    try:
+        return fn()
+    finally:
+        stop.set()
+        thread.join(timeout=0.5)
 
 TOOLS = [
     {
@@ -83,7 +108,7 @@ TOOLS = [
 
 
 def get_client() -> OpenAI:
-    return OpenAI(base_url=CONFIG.base_url, api_key="not-needed")
+    return OpenAI(base_url=CONFIG.base_url, api_key="not-needed", timeout=CONFIG.llm_timeout_seconds)
 
 
 def _retry(fn, *args, **kwargs):
@@ -108,7 +133,8 @@ def check_availability() -> bool:
         return False
 
 
-def ask(user_question: str, system_context: str = "", temperature: float = 0.3) -> str:
+def ask(user_question: str, system_context: str = "", temperature: float = 0.3,
+        label: str = "Waiting for model") -> str:
     client = get_client()
     messages = []
     if system_context:
@@ -120,15 +146,22 @@ def ask(user_question: str, system_context: str = "", temperature: float = 0.3) 
             model=CONFIG.model,
             messages=messages,
             temperature=temperature,
+            max_tokens=CONFIG.max_tokens,
+            extra_body={"thinking_budget_tokens": CONFIG.thinking_budget_tokens},
         )
-        return response.choices[0].message.content
+        message = response.choices[0].message
+        reasoning = getattr(message, "reasoning_content", None)
+        if reasoning:
+            print(f"    ...reasoning content: {len(reasoning)} chars", flush=True)
+        return message.content
 
-    return _retry(call)
+    return _call_with_heartbeat(lambda: _retry(call), label)
 
 
-def ask_json(user_question: str, system_context: str = "", temperature: float = 0.1, retries: int = 2) -> dict:
+def ask_json(user_question: str, system_context: str = "", temperature: float = 0.1,
+             retries: int = 2, label: str = "Waiting for model") -> dict:
     for attempt in range(retries + 1):
-        response = ask(user_question, system_context, temperature=temperature)
+        response = ask(user_question, system_context, temperature=temperature, label=label)
         result = extract_json(response)
         if result:
             return result
@@ -167,7 +200,8 @@ def extract_json(response: str) -> dict:
     return {}
 
 
-def chat_with_tools(messages: list, tools: list = None, temperature: float = 0.2, tool_choice: str = "auto"):
+def chat_with_tools(messages: list, tools: list = None, temperature: float = 0.2, tool_choice: str = "auto",
+                    label: str = "Waiting for model"):
     client = get_client()
     if tools is None:
         tools = TOOLS
@@ -179,7 +213,8 @@ def chat_with_tools(messages: list, tools: list = None, temperature: float = 0.2
             tools=tools,
             tool_choice=tool_choice,
             temperature=temperature,
+            extra_body={"thinking_budget_tokens": CONFIG.thinking_budget_tokens},
         )
         return response.choices[0].message
 
-    return _retry(call)
+    return _call_with_heartbeat(lambda: _retry(call), label)

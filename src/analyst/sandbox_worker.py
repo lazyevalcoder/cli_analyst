@@ -17,7 +17,7 @@ from src.analyst.sandbox import (
     _check_ast_safe,
 )
 
-_SKIP = {"pd", "json", "np"}
+_SKIP = {"pd", "json", "np", "math"}
 
 
 def _inject_modules(namespace: dict) -> None:
@@ -33,10 +33,16 @@ def _inject_modules(namespace: dict) -> None:
         namespace["np"] = np
     except ImportError:
         pass
+    try:
+        import math
+
+        namespace["math"] = math
+    except ImportError:
+        pass
 
 
 def _write_out(namespace: dict, out_path: str) -> None:
-    to_pickle = {k: v for k, v in namespace.items() if k not in _SKIP}
+    to_pickle = {k: v for k, v in namespace.items() if k not in _SKIP and k != "__builtins__"}
     with open(out_path, "wb") as f:
         pickle.dump(to_pickle, f)
 
@@ -76,7 +82,8 @@ def main() -> None:
     stdout_capture = io.StringIO()
     try:
         with redirect_stdout(stdout_capture):
-            exec(code, {"__builtins__": SAFE_BUILTINS}, namespace)
+            namespace["__builtins__"] = SAFE_BUILTINS
+            exec(code, namespace, namespace)
     except Exception:
         try:
             _write_out(namespace, out_path)
