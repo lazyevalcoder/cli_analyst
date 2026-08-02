@@ -80,10 +80,12 @@ class KnowledgeGraph:
         nodes = []
         edges = []
         for e in entries:
+            kind = e.get("kind", "")
+            node_type = "kpi" if kind == "kpi" else ("operational_metric" if kind == "supporting_metric" else "kpi")
             node = {
                 "id": e.get("id", ""),
                 "name": e.get("name", ""),
-                "type": "kpi" if e.get("kind") == "kpi" else "supporting_metric",
+                "type": node_type,
                 "priority": e.get("priority", ""),
                 "metric": e.get("metric", ""),
                 "description": e.get("description", ""),
@@ -108,8 +110,45 @@ class KnowledgeGraph:
         edges = []
         for pri in priorities:
             pname = pri.get("name", "")
+            kpis = pri.get("kpis", [])
+            if kpis:
+                for k in kpis:
+                    kid = _slugify(k.get("name", ""))
+                    if kid and kid not in seen:
+                        seen.add(kid)
+                        nodes.append({
+                            "id": kid,
+                            "name": k.get("name", ""),
+                            "type": "kpi",
+                            "priority": pname,
+                            "metric": k.get("metric", ""),
+                            "description": k.get("description", ""),
+                            "measurement": k.get("measurement", ""),
+                            "source": "llm-generated",
+                        })
+                    for op in k.get("operational_metrics", []):
+                        oid = _slugify(op.get("name", ""))
+                        if oid and oid not in seen:
+                            seen.add(oid)
+                            nodes.append({
+                                "id": oid,
+                                "name": op.get("name", ""),
+                                "type": "operational_metric",
+                                "priority": pname,
+                                "metric": op.get("metric", ""),
+                                "description": op.get("description", ""),
+                                "measurement": op.get("measurement", ""),
+                                "source": "llm-generated",
+                            })
+                        if oid and kid:
+                            edges.append({
+                                "source": oid,
+                                "target": kid,
+                                "relation": "INFLUENCES",
+                            })
+                continue
             eqs = pri.get("executive_questions", [])
-            if eqs:
+            if eqs and isinstance(eqs[0], dict):
                 for eq in eqs:
                     eq_name = eq.get("question", "")
                     for k in eq.get("kpis", []):
@@ -134,7 +173,7 @@ class KnowledgeGraph:
                             nodes.append({
                                 "id": sid,
                                 "name": s.get("name", ""),
-                                "type": "supporting_metric",
+                                "type": "operational_metric",
                                 "priority": pname,
                                 "executive_question": eq_name,
                                 "metric": s.get("metric", ""),
@@ -142,43 +181,6 @@ class KnowledgeGraph:
                                 "measurement": s.get("measurement", ""),
                                 "source": "llm-generated",
                             })
-                            for ref in s.get("influences", []):
-                                ref_id = _slugify(ref)
-                                if ref_id:
-                                    edges.append({
-                                        "source": sid,
-                                        "target": ref_id,
-                                        "relation": "INFLUENCES",
-                                    })
-            else:
-                for k in pri.get("kpis", []):
-                    kid = _slugify(k.get("name", ""))
-                    if kid and kid not in seen:
-                        seen.add(kid)
-                        nodes.append({
-                            "id": kid,
-                            "name": k.get("name", ""),
-                            "type": "kpi",
-                            "priority": pname,
-                            "metric": k.get("metric", ""),
-                            "description": k.get("description", ""),
-                            "measurement": k.get("measurement", ""),
-                            "source": "llm-generated",
-                        })
-                for s in pri.get("supporting_metrics", []):
-                    sid = _slugify(s.get("name", ""))
-                    if sid and sid not in seen:
-                        seen.add(sid)
-                        nodes.append({
-                            "id": sid,
-                            "name": s.get("name", ""),
-                            "type": "supporting_metric",
-                            "priority": pname,
-                            "metric": s.get("metric", ""),
-                            "description": s.get("description", ""),
-                            "measurement": s.get("measurement", ""),
-                            "source": "llm-generated",
-                        })
                         for ref in s.get("influences", []):
                             ref_id = _slugify(ref)
                             if ref_id:
@@ -187,6 +189,43 @@ class KnowledgeGraph:
                                     "target": ref_id,
                                     "relation": "INFLUENCES",
                                 })
+                continue
+            for k in pri.get("kpis", []):
+                kid = _slugify(k.get("name", ""))
+                if kid and kid not in seen:
+                    seen.add(kid)
+                    nodes.append({
+                        "id": kid,
+                        "name": k.get("name", ""),
+                        "type": "kpi",
+                        "priority": pname,
+                        "metric": k.get("metric", ""),
+                        "description": k.get("description", ""),
+                        "measurement": k.get("measurement", ""),
+                        "source": "llm-generated",
+                    })
+            for s in pri.get("supporting_metrics", []):
+                sid = _slugify(s.get("name", ""))
+                if sid and sid not in seen:
+                    seen.add(sid)
+                    nodes.append({
+                        "id": sid,
+                        "name": s.get("name", ""),
+                        "type": "operational_metric",
+                        "priority": pname,
+                        "metric": s.get("metric", ""),
+                        "description": s.get("description", ""),
+                        "measurement": s.get("measurement", ""),
+                        "source": "llm-generated",
+                    })
+                for ref in s.get("influences", []):
+                    ref_id = _slugify(ref)
+                    if ref_id:
+                        edges.append({
+                            "source": sid,
+                            "target": ref_id,
+                            "relation": "INFLUENCES",
+                        })
         return cls(nodes, edges)
 
     # ---- build unified graph from all sources ----
@@ -231,7 +270,7 @@ class KnowledgeGraph:
 
     @property
     def entries(self) -> list[dict]:
-        return [n for n in self._nodes if n.get("type") in ("kpi", "supporting_metric")]
+        return [n for n in self._nodes if n.get("type") in ("kpi", "operational_metric", "supporting_metric")]
 
     def __len__(self) -> int:
         return len(self.entries)

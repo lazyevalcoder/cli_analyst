@@ -108,22 +108,32 @@ Each priority in `priorities.json` follows this structure:
 
 ```json
 {
-  "name": "Revenue Growth & Market Momentum",
+  "name": "Build enough qualified pipeline",
   "description": "...",
-  "focus_areas": "...",
   "executive_questions": [
+    "Are we generating enough pipeline to sustain growth?",
+    "Where is pipeline stalling?"
+  ],
+  "kpis": [
     {
-      "question": "Are we generating enough pipeline to sustain growth?",
-      "kpis": [
-        { "name": "Revenue Growth Trajectory", "metric": "Sales", "description": "...", "measurement": "..." }
+      "name": "Active Pipeline Volume Growth",
+      "metric": "deal_stage",
+      "description": "...",
+      "measurement": "Percentage change in the count of active opportunities vs the prior period",
+      "operational_metrics": [
+        { "name": "New Opportunity Inflow", "metric": "engage_date", "description": "...", "measurement": "..." }
       ],
-      "supporting_metrics": [
-        { "name": "Order Volume Trend", "metric": "Quantity", "description": "...", "measurement": "...", "influences": ["Revenue Growth Trajectory"] }
-      ]
+      "analytical_lenses": ["Trends", "Cohorts"]
     }
   ]
 }
 ```
+
+Every KPI and operational metric must pass the **Metric Computability Rule Book**
+(`src/analyst/prompts/metric_computability_rules.md`) — a hard five-test gate
+(SCALAR, COMPUTABLE, BASELINE, ANCHOR, EXPRESSIBLE). A metric that fails any test is
+not defined; the compute engine hard-fails anything that slips through, with a
+plain-language reason — never a substituted or degraded value.
 
 ### Unified Knowledge Graph
 
@@ -208,6 +218,7 @@ Jul25/
 │       ├── diagnostic_kg_prompt.md   # Diagnostic KG creation prompt
 │       ├── reasoning_context_prompt.md  # Dataset-specific context prompt
 │       ├── priorities_prompt.md      # Strategic priority extraction prompt
+│       ├── metric_computability_rules.md  # Computability rule book (definition gate)
 │       ├── priority_period_prompt.md # Current-vs-prior period resolution
 │       ├── priority_spec_prompt.md   # Per-metric compute specs (compute tier)
 │       ├── interpret_priority_prompt.md # Quick interpret tier narration
@@ -472,7 +483,10 @@ CONFIG.temperature_synthesis  # Final answer synthesis (0.4)
 
 ## Future Plans
 
+- [x] **Metric Computability Rule Book** — a hard five-test gate (SCALAR, COMPUTABLE, BASELINE, ANCHOR, EXPRESSIBLE) every KPI and operational metric must pass before it is proposed; injected into the priority and spec prompts. The compute engine hard-fails anything that slips through with a plain-language reason (`reason_display`) — a metric either computes or is honestly `Not computed`. No substituted values, no degraded versions.
 - [x] **Three-tier priority analysis** (`compute` / `analyze` deep / `interpret` quick) — pre-compute scalar metric values into `metadata/priority_values.json`, seed the deep agentic loop with them, and add a single-call interpret tier. Compute uses a spec + deterministic template (the LLM emits per-metric specs, a fixed `build_metric_script` template runs them — no LLM-written pandas). See `docs/concepts/priority-compute-analyze-three-tier-split.md`.
+- [x] **Closed compute-expressibility surface** — the spec DSL now covers every common scalar shape so a computable metric is never mis-rejected: FORM-1 `agg` over `prep`-derived columns (e.g. `mean(days between A and B)`), a `group` step with `group_by: null` (whole-frame scalar), a count-condition `share` (e.g. "share of orders using 'Express Air'"), and the `median` aggregate. A measurement→form routing table in `priority_spec_prompt.md` teaches the spec LLM the surface; omitted specs are retried once in the repair pass; `tests/test_spec_expressibility.py` locks every shape so a regression fails CI.
+- [x] **Priority dimension breakdowns** — metrics in rows, dimension members in columns. `priorities compute <n>` asks the LLM for ONE schema-validated dimension per priority (SalesOrders: Region / Customer Segment / Ship Mode), then deterministically re-runs each computed metric's stored spec per member and persists a `{current, prior, delta}` matrix in `priority_values.json`. Per-member cells with no data or a zero baseline are honestly `not computed`. `priorities interpret <n>` reads the breakdown ("growth led by the East region, +111% vs +49% overall; West flat") and the viewer renders the matrix. `tests/test_priority_breakdowns.py` covers suggestion validation, per-member values, and persistence.
 - [ ] **Scorecard artifact** — dashboard-matrix data model (outcomes × dimension cells) with filter-keyed values; the roadmap in `docs/concepts/roadmap.md`. Requires the priorities-quality foundation (validator + blueprint + few-shot bank) first.
 - [ ] Update KGs with computed insights
 - [ ] Support multiple CSVs / joins

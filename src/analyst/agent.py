@@ -136,17 +136,18 @@ def agentic_answer(question: str, df, schema: str, structural_kg: dict, diagnost
         precomputed = "PRE-COMPUTED VALUES" in metric_brief
         if precomputed:
             phase1 = (
-                "PHASE 1 — METRICS: The brief includes PRE-COMPUTED VALUES for the KPIs and supporting metrics. "
+                "PHASE 1 — METRICS: The brief includes PRE-COMPUTED VALUES for the KPIs and operational metrics. "
                 "Interpret these values directly; do NOT recompute base metrics. Recompute (verify) a value once ONLY if it looks wrong. "
-                "Metrics whose status is 'not_computable' or 'error' (or absent from the values) MAY be computed once yourself — mark them 'recomputed in-loop' in your output."
+                "Metrics whose status is 'not_computable' or 'error' (or absent from the values) MAY be computed once yourself — mark them 'recomputed in-loop' in your output. "
+                "If a metric genuinely cannot be computed from the data, do NOT substitute a different kind of value; state plainly why (in business language, not jargon) and move on."
             )
         else:
             phase1 = (
-                "PHASE 1 — METRICS: Compute EVERY KPI in the brief (current value + delta vs prior period) using the exact Measurement formula and EXACT column names. Also compute its supporting metrics. Use lookup_metric for any metric definition."
+                "PHASE 1 — METRICS: Compute EVERY KPI in the brief (current value + delta vs prior period) using the exact Measurement formula and EXACT column names. Also compute its operational metrics (drivers). Use lookup_metric for any metric definition."
             )
         metric_brief_str = f"""
 
-METRIC BRIEF — these are the pre-defined KPIs and supporting metrics to compute for this priority:
+METRIC BRIEF — these are the pre-defined KPIs and operational metrics (drivers) for this priority:
 {metric_brief}
 
 TWO-PHASE EXECUTION:
@@ -155,7 +156,7 @@ PHASE 2 — DIMENSION DRILL-DOWN (only when it makes sense): For any KPI that is
 OUTPUT FORMAT (structured per-KPI insight):
   Q<n>: <question>
     KPI <name>: <value>, <delta vs prior> → <business read>
-      Driver: <supporting metric> explains <...>
+      Driver: <operational metric> explains <...>
       Implication: <...>
       [If KPI is off] By <dimension>: <where the issue originates> → <why>
 """

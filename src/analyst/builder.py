@@ -168,7 +168,12 @@ def get_full_reasoning_framework(schema: str, structural_kg: dict, diagnostic_kg
     return f"{generic_framework}\n\n{context_text}"
 
 
-def identify_priorities(schema: str, structural_kg: dict, diagnostic_kg: dict) -> list:
+def identify_priorities(schema: str, structural_kg: dict, diagnostic_kg: dict) -> dict:
+    """Generate the strategic priority framework from schema + KGs.
+
+    Returns a dict with `domain`, `health_indicators`, and `priorities` (the new
+    outcome → executive questions → KPIs → operational metrics → lenses model).
+    """
     prompt = prompts.format(
         prompts.load("priorities_prompt.md"),
         schema=schema,
@@ -176,21 +181,24 @@ def identify_priorities(schema: str, structural_kg: dict, diagnostic_kg: dict) -
         diagnostic_kg=str(diagnostic_kg),
     )
     raw = llm.ask_json(prompt, system_context="You are a strategy consultant. Return only valid JSON.")
-    priorities = raw.get("priorities", []) if isinstance(raw, dict) else []
-    if not priorities:
-        return []
-    return priorities
+    if not isinstance(raw, dict):
+        return {"domain": "", "health_indicators": [], "priorities": []}
+    priorities = raw.get("priorities", []) if isinstance(raw.get("priorities"), list) else []
+    return {
+        "domain": raw.get("domain", ""),
+        "health_indicators": raw.get("health_indicators", []) if isinstance(raw.get("health_indicators"), list) else [],
+        "priorities": priorities,
+    }
 
 
 def format_priority_metric_brief(pri: dict, diagnostic_kg: dict = None, values: dict = None) -> str:
-    """Render a priority's KPIs + supporting metrics (with DKG drill-down dimensions) as a prompt brief.
+    """Render a priority's KPIs + operational metrics (with DKG drill-down dimensions) as a prompt brief.
 
     If `values` (the per-priority stored values dict) is supplied, appends a PRE-COMPUTED VALUES section.
+    Supports both the new model and legacy shapes.
     """
     from src.analyst.graph import _slugify
     eqs = pri.get("executive_questions", [])
-    if not eqs:
-        return ""
     dims = diagnostic_kg.get("dimensions_affecting", {}) if isinstance(diagnostic_kg, dict) else {}
     dims_lower = {str(k).lower(): v for k, v in dims.items()}
 
@@ -200,25 +208,60 @@ def format_priority_metric_brief(pri: dict, diagnostic_kg: dict = None, values: 
                 return dims_lower[key]
         return []
 
+    def kpi_block(k, indent: str = "  ") -> list:
+        col = k.get("metric", "")
+        lines = [f"{indent}KPI: {k.get('name', '?')} (source: {col})"]
+        if k.get("measurement"):
+            lines.append(f"{indent}  Measurement: {k.get('measurement', '')}")
+        dd = drill_dims(k.get("name", ""), col)
+        if dd:
+            lines.append(f"{indent}  Drill-down dimensions (from DKG): {', '.join(dd)}")
+        lenses = k.get("analytical_lenses", [])
+        if lenses:
+            lines.append(f"{indent}  Analytical lenses: {', '.join(lenses)}")
+        for op in k.get("operational_metrics", []):
+            ocol = op.get("metric", "")
+            lines.append(f"{indent}  OPERATIONAL: {op.get('name', '?')} (source: {ocol})")
+            if op.get("measurement"):
+                lines.append(f"{indent}    Measurement: {op.get('measurement', '')}")
+        return lines
+
     lines = [f"PRIORITY: {pri.get('name', '')}", ""]
-    for i, eq in enumerate(eqs, 1):
-        lines.append(f"EXECUTIVE QUESTION {i}: {eq.get('question', '?')}")
-        for k in eq.get("kpis", []):
-            col = k.get("metric", "")
-            lines.append(f"  KPI: {k.get('name', '?')} (source: {col})")
-            if k.get("measurement"):
-                lines.append(f"    Measurement: {k.get('measurement', '')}")
-            dd = drill_dims(k.get("name", ""), col)
-            if dd:
-                lines.append(f"    Drill-down dimensions (from DKG): {', '.join(dd)}")
-        for s in eq.get("supporting_metrics", []):
+    if pri.get("description"):
+        lines.append(f"OBJECTIVE: {pri.get('description', '')}")
+        lines.append("")
+
+    kpis = pri.get("kpis", [])
+    if kpis:
+        if isinstance(eqs, list) and eqs and not isinstance(eqs[0], dict):
+            lines.append("EXECUTIVE QUESTIONS (framing):")
+            for q in eqs:
+                lines.append(f"  - {q}")
+            lines.append("")
+        for k in kpis:
+            lines.extend(kpi_block(k))
+            lines.append("")
+    else:
+        eq_objs = [e for e in eqs if isinstance(e, dict)]
+        for i, eq in enumerate(eq_objs, 1):
+            lines.append(f"EXECUTIVE QUESTION {i}: {eq.get('question', '?')}")
+            for k in eq.get("kpis", []):
+                lines.extend(kpi_block(k, "  "))
+            for s in eq.get("supporting_metrics", []):
+                col = s.get("metric", "")
+                lines.append(f"  SUPPORTING: {s.get('name', '?')} (source: {col})")
+                if s.get("measurement"):
+                    lines.append(f"    Measurement: {s.get('measurement', '')}")
+            lines.append("")
+        for k in pri.get("kpis", []):
+            lines.extend(kpi_block(k))
+            lines.append("")
+        for s in pri.get("supporting_metrics", []):
             col = s.get("metric", "")
-            inf = s.get("influences", [])
-            inf_str = f" [influences: {', '.join(inf)}]" if inf else ""
-            lines.append(f"  SUPPORTING: {s.get('name', '?')} (source: {col}){inf_str}")
+            lines.append(f"  SUPPORTING: {s.get('name', '?')} (source: {col})")
             if s.get("measurement"):
                 lines.append(f"    Measurement: {s.get('measurement', '')}")
-        lines.append("")
+            lines.append("")
 
     if values:
         lines.append("PRE-COMPUTED VALUES:")
@@ -230,6 +273,10 @@ def format_priority_metric_brief(pri: dict, diagnostic_kg: dict = None, values: 
             period = rec.get("period", "")
             status = rec.get("status", "")
             verified = rec.get("verified", False)
+            if status == "not_computable":
+                reason = rec.get("reason_display") or friendly_reason(rec.get("reason", ""))
+                lines.append(f"  {mname}: NOT COMPUTED — {reason}")
+                continue
             line = f"  {mname}: value={value} {unit}".rstrip()
             if period:
                 line += f" | period: {period}"
@@ -260,12 +307,30 @@ def generate_briefing(schema: str, structural_kg: dict, diagnostic_kg: dict, pri
 
 
 def _iter_priority_metrics(pri: dict):
-    """Yield (kind, metric) for every KPI and supporting metric in a priority."""
-    for eq in pri.get("executive_questions", []):
-        for k in eq.get("kpis", []):
+    """Yield (kind, metric) for every KPI and operational metric in a priority.
+
+    Supports the new model (KPIs with nested `operational_metrics`) and the legacy
+    shapes (flat `supporting_metrics` or nested `executive_questions`).
+    """
+    kpis = pri.get("kpis", [])
+    if kpis:
+        for k in kpis:
             yield "KPI", k
-        for s in eq.get("supporting_metrics", []):
-            yield "SUPPORTING", s
+            for op in k.get("operational_metrics", []):
+                yield "OPERATIONAL", op
+        return
+    eqs = pri.get("executive_questions", [])
+    if eqs and isinstance(eqs[0], dict):
+        for eq in eqs:
+            for k in eq.get("kpis", []):
+                yield "KPI", k
+            for s in eq.get("supporting_metrics", []):
+                yield "OPERATIONAL", s
+        return
+    for k in pri.get("kpis", []):
+        yield "KPI", k
+    for s in pri.get("supporting_metrics", []):
+        yield "OPERATIONAL", s
 
 
 def priority_fingerprint(pri: dict) -> str:
@@ -490,17 +555,17 @@ def _parse_compute_output(output: str) -> dict:
     return data
 
 
-_AGGS = {"count", "sum", "mean", "std", "ratio", "share", "topk_share", "count_distinct"}
+_AGGS = {"count", "sum", "mean", "median", "std", "ratio", "share", "topk_share", "count_distinct"}
 _COMPARES = {"level", "pct_change", "pp_change", "rate_ratio"}
 _BLOCKED_IN_CONDITION = ("import", "__", "open(", "exec(", "eval(", "compile(", "os.", "sys.")
 
 # Operator DSL (metric-spec-v2-composable-operator-dsl.md)
-_INNER_AGGS = {"count", "sum", "mean", "std", "min", "max", "share"}
-_OUTER_AGGS = {"mean", "std", "max", "min", "sum"}
+_INNER_AGGS = {"count", "sum", "mean", "median", "std", "min", "max", "share"}
+_OUTER_AGGS = {"mean", "median", "std", "max", "min", "sum"}
 _DERIVE_OPS = {"derive.days_between", "derive.year_of", "derive.month_of", "derive.arithmetic"}
 
 # Bump when the compute engine changes behavior so stored values are forced to recompute.
-COMPUTE_ENGINE_VERSION = "engine-v3-2026-08-02"
+COMPUTE_ENGINE_VERSION = "engine-v3-2026-08-02-breakdowns"
 
 # Residual pre-filter: only DATA-LIMITED measurements are hard-filtered now. Per-group /
 # by / top-% / distinct / new measurements are expressible via the operator DSL and flow
@@ -534,6 +599,98 @@ def _non_scalar_reason(measurement: str) -> tuple[str, str]:
                 f"(matched \"{m.group(0).strip()}\")",
                 _DATA_LIMITED_PRIMITIVE,
             )
+    return "", ""
+
+
+# ---------------------------------------------------------------------------
+# Computability rule book — plain-language reasons + data-aware pre-check.
+# Philosophy: a metric either computes or it is honestly NOT computed. No
+# substituted values, no degraded versions, no jargon leaking to users.
+# ---------------------------------------------------------------------------
+
+_FRIENDLY_REASON_MAP = [
+    (re.compile(r"no prior-period baseline \(prior value is 0\)", re.I),
+     "There is no earlier period to compare against — the prior value is zero, so a "
+     "percentage change can't be computed."),
+    (re.compile(r"prior comparison period contains no data|prior period.*no data|no data.*prior period", re.I),
+     "The prior comparison period has no data, so a period-over-period change can't be computed."),
+    (re.compile(r"no time dimension|no time column|no prior period \(no time", re.I),
+     "The data has no time column, so period-over-period metrics can't be computed."),
+    (re.compile(r"metric omitted or not produced in output", re.I),
+     "This metric couldn't be expressed in a form the compute engine supports, so it was not computed."),
+    (re.compile(r"LLM could not express this measurement as a scalar spec", re.I),
+     "This metric couldn't be expressed in a form the compute engine supports, so it was not computed."),
+    (re.compile(r"no valid spec produced", re.I),
+     "No valid computation definition could be produced for this metric."),
+    (re.compile(r"template returned null", re.I),
+     "The metric's formula returned no value — for example, an empty prior period or a division by zero."),
+    (re.compile(r"division by zero|divide by zero|empty prior period", re.I),
+     "The calculation had nothing to divide by, so no value can be produced."),
+    (re.compile(r"requires per-row stage-entry/transition timestamps", re.I),
+     "This metric needs per-stage timing data (entry/transition timestamps) that this dataset doesn't contain."),
+    (re.compile(r"not in schema|unknown column|not a column", re.I),
+     "This metric references a column that isn't in the data."),
+    (re.compile(r"malformed value record", re.I),
+     "The computed result was malformed, so no value could be recorded."),
+    (re.compile(r"script failed", re.I),
+     "The computation hit an error and could not produce a value."),
+    (re.compile(r"no value produced", re.I),
+     "No value could be produced for this metric."),
+]
+
+
+def friendly_reason(reason) -> str:
+    """Translate a technical not-computed reason into plain business language."""
+    if not reason:
+        return ""
+    text = str(reason)
+    for pat, msg in _FRIENDLY_REASON_MAP:
+        if pat.search(text):
+            return msg
+    return text
+
+
+_DELTA_LANGUAGE_PATTERNS = (
+    re.compile(r"\b(percentage|pct|%)[\s-]*change\b", re.I),
+    re.compile(r"\b(change|growth|decline|shrink)\b.*\b(rate|percent|pct|%)\b", re.I),
+    re.compile(r"\b(versus|vs\.?|compared to|relative to)\s+(the\s+)?prior\b", re.I),
+    re.compile(r"\b(period-over-period|qoq|yoy|mom|over the prior|from the prior)\b", re.I),
+)
+
+
+def _is_delta_measurement(text: str) -> bool:
+    return any(p.search(text) for p in _DELTA_LANGUAGE_PATTERNS)
+
+
+def _precheck_measurement(measurement: str, period: dict, df: pd.DataFrame = None) -> tuple[str, str]:
+    """Data-aware gate from the rule book (BASELINE / ANCHOR), run before any LLM call.
+
+    Returns (reason, missing_primitive); both '' when the measurement should flow to
+    the LLM. Only deterministic, provable cases are hard-filtered here — everything
+    else flows to the spec generator and the runtime guard.
+    """
+    reason, prim = _non_scalar_reason(measurement)
+    if reason:
+        return reason, prim
+    text = str(measurement or "")
+    if not _is_delta_measurement(text):
+        return "", ""
+    if not period.get("date_column") or not period.get("prior_start"):
+        return ("the dataset has no time dimension to compare against — period-over-period "
+                "metrics cannot be computed", "no prior period (no time dimension)")
+    if df is not None and period.get("date_column") and period.get("prior_start") and period.get("prior_end"):
+        col = period["date_column"]
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                s = pd.to_datetime(df[col], errors="coerce").dropna()
+            has_prior = bool(((s >= pd.Timestamp(period["prior_start"])) &
+                              (s <= pd.Timestamp(period["prior_end"]))).any())
+        except Exception:
+            has_prior = True
+        if not has_prior:
+            return ("the prior comparison period contains no data, so a period-over-period "
+                    "change cannot be computed", "empty prior period")
     return "", ""
 
 
@@ -690,7 +847,7 @@ def _validate_spec(spec: dict, columns: set, batch_names: set = None) -> tuple[b
             opn = step.get("op")
             if opn == "group":
                 gcol = step.get("group_by")
-                if gcol not in columns and gcol not in derived:
+                if gcol is not None and gcol not in columns and gcol not in derived:
                     return False, f"group step group_by '{gcol}' not in schema"
                 inner = step.get("inner_agg")
                 if inner not in _INNER_AGGS:
@@ -717,9 +874,9 @@ def _validate_spec(spec: dict, columns: set, batch_names: set = None) -> tuple[b
     else:
         if agg not in _AGGS:
             return False, f"unknown agg '{agg}'"
-        if agg in ("sum", "mean", "std", "topk_share", "count_distinct"):
+        if agg in ("sum", "mean", "median", "std", "topk_share", "count_distinct"):
             col = spec.get("value_column")
-            if col not in columns:
+            if col not in columns and col not in derived:
                 return False, f"value_column '{col}' not in schema"
         if agg in ("ratio", "share"):
             if agg == "ratio":
@@ -755,7 +912,7 @@ def _validate_spec(spec: dict, columns: set, batch_names: set = None) -> tuple[b
         if not isinstance(ref, str) or not ref:
             return False, "input_ref must be a metric name"
         if batch_names is not None and ref not in batch_names:
-            return False, f"input_ref '{ref}' not in this executive question"
+            return False, f"input_ref '{ref}' not in this metric group"
         if compare != "level":
             return False, "input_ref only supports compare='level' in this version"
 
@@ -786,6 +943,8 @@ def _sel_block(mask_var: str, sub: dict, out_var: str) -> list[str]:
             lines.append(f"    {out_var} = float(_v_ser.sum())")
         elif agg == "mean":
             lines.append(f"    {out_var} = float(_v_ser.mean())")
+        elif agg == "median":
+            lines.append(f"    {out_var} = float(_v_ser.median())")
         else:  # std
             lines.append(f"    {out_var} = float(_v_ser.std())")
     return lines
@@ -809,6 +968,18 @@ def _emit_group_step(lines: list[str], mask_var: str, step: dict, out_var: str) 
     val = step.get("value")
     inner = step.get("inner_agg")
     outer = step.get("outer_agg")
+    if gcol is None:
+        if inner == "count":
+            lines.append(f"    _g = pd.Series([float(len(df.loc[{mask_var}]))])")
+        elif inner == "share":
+            lines.append("    _g = pd.Series([1.0])")
+        else:
+            lines.append(f"    _g = pd.Series([df.loc[{mask_var}][{val!r}].agg({inner!r})])")
+        lines.append("    if _g.isna().any():")
+        lines.append(f"        {out_var} = None")
+        lines.append("    else:")
+        lines.append(f"        {out_var} = float(_g.agg({outer!r}))")
+        return
     if inner == "count":
         lines.append(f"    _g = df.loc[{mask_var}].groupby({gcol!r}).size()")
     elif inner == "share":
@@ -858,15 +1029,20 @@ def _emit_period_value(lines: list[str], mask_var: str, spec: dict, period: dict
         return
 
     agg = spec.get("agg")
-    if agg in ("count", "sum", "mean", "std", "count_distinct"):
+    if agg in ("count", "sum", "mean", "median", "std", "count_distinct"):
         lines += _sel_block(mask_var, {"agg": agg, "value_column": spec.get("value_column"),
                                        "condition": spec.get("condition")}, out_var)
     elif agg in ("ratio", "share"):
-        num = spec.get("numerator") or {"agg": "sum", "value_column": spec.get("value_column"),
-                                        "condition": spec.get("condition")}
-        den = spec.get("denominator")
-        if den is None and agg == "share":
-            den = {"agg": "sum", "value_column": spec.get("value_column"), "condition": None}
+        vcol = spec.get("value_column")
+        if agg == "share" and vcol is None:
+            num = spec.get("numerator") or {"agg": "count", "condition": spec.get("condition")}
+            den = spec.get("denominator") or {"agg": "count", "condition": None}
+        else:
+            num = spec.get("numerator") or {"agg": "sum", "value_column": vcol,
+                                            "condition": spec.get("condition")}
+            den = spec.get("denominator")
+            if den is None and agg == "share":
+                den = {"agg": "sum", "value_column": vcol, "condition": None}
         lines += _sel_block(mask_var, num, "_n")
         lines += _sel_block(mask_var, den, "_d")
         lines.append(f"    {out_var} = (_n / _d) if (_d is not None and _d != 0) else None")
@@ -979,18 +1155,262 @@ def build_metric_script(specs: list[dict], period: dict) -> str:
     return "\n".join(lines)
 
 
+def _nc_record(period: dict, measurement: str, reason: str, missing_prim: str = None, spec=None, basis="", unit=""):
+    """Build a not_computable value record with both a technical `reason` and a
+    plain-language `reason_display` (rule book: honest statuses, no jargon)."""
+    rec = {
+        "filters": [],
+        "value": None,
+        "unit": unit,
+        "basis": basis,
+        "period": period["current_period"],
+        "measurement": measurement,
+        "spec": spec,
+        "verified": False,
+        "status": "not_computable",
+        "reason": reason,
+        "reason_display": friendly_reason(reason),
+    }
+    if missing_prim:
+        rec["missing_primitive"] = missing_prim
+    return rec
+
+
+# ---- Dimension breakdowns (metrics in rows, dimension members in columns) ----
+# Reuses each computed metric's stored `spec` and the trusted executor: for a given
+# dimension, a per-member table of {current, prior, delta} is produced deterministically.
+
+
+def _mask_lines(period: dict) -> list[str]:
+    """Script lines defining `_CUR`/`_PRI` boolean masks from the period's date column."""
+    date_col = period.get("date_column")
+    lines = []
+    if date_col:
+        lines.append(f"_DT = pd.to_datetime(df[{date_col!r}], errors='coerce')")
+        cur_lo, cur_hi = period.get("current_start"), period.get("current_end")
+        pri_lo, pri_hi = period.get("prior_start"), period.get("prior_end")
+        if cur_lo and cur_hi and pri_lo and pri_hi:
+            lines.append(f"_CUR = (_DT >= pd.Timestamp({cur_lo!r})) & (_DT <= pd.Timestamp({cur_hi!r}))")
+            lines.append(f"_PRI = (_DT >= pd.Timestamp({pri_lo!r})) & (_DT <= pd.Timestamp({pri_hi!r}))")
+        else:
+            lines.append("_CUR = pd.Series(True, index=df.index)")
+            lines.append("_PRI = pd.Series(False, index=df.index)")
+    else:
+        lines.append("_CUR = pd.Series(True, index=df.index)")
+        lines.append("_PRI = pd.Series(False, index=df.index)")
+    return lines
+
+
+def _build_cell_script(spec: dict, period: dict) -> str:
+    """One execution computing a metric's RAW current and prior scalars over whatever
+    df is passed (compare-agnostic), plus per-window row counts so a member with no rows
+    in a window is distinguishable from a real zero baseline. Used per member."""
+    lines = ["_out = {}"] + _mask_lines(period)
+    _emit_prep(lines, [spec])
+    lines.append("_out['_cur_n'] = int(len(df[_CUR]))")
+    lines.append("_out['_pri_n'] = int(len(df[_PRI]))")
+    lines.append("try:")
+    _emit_period_value(lines, "_CUR", spec, period, "_c")
+    lines.append("    _out['_cur'] = _c")
+    _emit_period_value(lines, "_PRI", spec, period, "_p")
+    lines.append("    _out['_pri'] = _p")
+    lines.append("except Exception:")
+    lines.append("    pass")
+    lines.append("print(json.dumps(_out, ensure_ascii=False))")
+    return "\n".join(lines)
+
+
+def _apply_compare(compare: str, cur, pri):
+    """Mirror of `_final_value`: the final metric value from raw per-period scalars."""
+    if compare == "level":
+        return cur
+    if cur is None or pri is None:
+        return None
+    if compare == "pct_change":
+        return (cur - pri) / pri if pri != 0 else None
+    if compare == "pp_change":
+        return cur - pri
+    if compare == "rate_ratio":
+        return cur / pri if pri != 0 else None
+    return None
+
+
+def _cell_verified(sub, period: dict, spec: dict, delta, unit: str) -> bool:
+    """Per-member cell verification: L1 re-derivation when the spec is recomputable,
+    otherwise L0 plausibility. Mirrors `_verify_layers` on the member subset."""
+    try:
+        if _recomputable_spec(spec):
+            expected = _recompute_value(sub, period, spec)
+            if expected is None:
+                return False
+            return _close(expected, delta)
+    except Exception:
+        pass
+    ok, _ = _check_value({"value": delta, "unit": unit, "spec": spec})
+    return ok
+
+
+def _breakdown_cell(sub, period: dict, spec: dict, mrec: dict) -> dict:
+    """One member cell: run the metric's spec on the member subset and return the
+    {current, prior, delta} record. Honest `not_computable` when data or a baseline
+    is missing for that member (rule book: no substituted values)."""
+    compare = spec.get("compare", "level")
+    unit = str(spec.get("unit") or mrec.get("unit") or "")
+    cur = pri = None
+    try:
+        code = _build_cell_script(spec, period)
+        ok, out = sandbox.execute_code(code, sub)
+        parsed = _parse_compute_output(out) if ok else {}
+        cur, pri = parsed.get("_cur"), parsed.get("_pri")
+        if parsed.get("_cur_n") == 0:
+            cur = None
+        if parsed.get("_pri_n") == 0:
+            pri = None
+    except Exception:
+        cur = pri = None
+    delta = _apply_compare(compare, cur, pri)
+    if cur is not None:
+        basis = f"current {cur:.3g}" if (compare == "level" or pri is None) else f"current {cur:.3g} vs prior {pri:.3g}"
+    else:
+        basis = ""
+    if delta is None:
+        if cur is None:
+            reason = "no rows for this member in the current period"
+        elif pri is None:
+            reason = "no rows for this member in the prior period"
+        else:
+            reason = "no prior-period baseline (prior value is 0)"
+        return {"current": cur, "prior": pri, "delta": None, "unit": unit, "basis": basis,
+                "status": "not_computable", "verified": False,
+                "reason": reason, "reason_display": friendly_reason(reason)}
+    return {"current": cur, "prior": pri, "delta": delta, "unit": unit, "basis": basis,
+            "status": "computed", "verified": _cell_verified(sub, period, spec, delta, unit)}
+
+
+def _dimension_members(df, col: str) -> list[str]:
+    """Sorted distinct non-null member values of a dimension column."""
+    return sorted(str(v) for v in df[col].dropna().astype(str).unique())
+
+
+def _categorical_dimension_candidates(df, period: dict, max_cardinality: int = 50,
+                                     min_coverage_rows: int = 1) -> list[dict]:
+    """Deterministic candidate dimension columns: text-typed, low-to-moderate
+    cardinality, with rows in BOTH the current and prior windows. Sorted by data
+    coverage (desc) then cardinality (asc) so the fallback pick is the most-backed."""
+    date_col = period.get("date_column")
+    cur_mask = pri_mask = None
+    if date_col and date_col in df.columns:
+        try:
+            _dt = pd.to_datetime(df[date_col], errors="coerce")
+            if period.get("current_start") and period.get("current_end"):
+                cur_mask = (_dt >= pd.Timestamp(period["current_start"])) & (_dt <= pd.Timestamp(period["current_end"]))
+            if period.get("prior_start") and period.get("prior_end"):
+                pri_mask = (_dt >= pd.Timestamp(period["prior_start"])) & (_dt <= pd.Timestamp(period["prior_end"]))
+        except Exception:
+            cur_mask = pri_mask = None
+    candidates = []
+    for col in df.columns:
+        if col == date_col:
+            continue
+        s = df[col]
+        if pd.api.types.is_numeric_dtype(s.dtype) or pd.api.types.is_datetime64_any_dtype(s.dtype):
+            continue
+        nonnull = s.notna()
+        uniq = s.dropna().astype(str).nunique()
+        if uniq < 2 or uniq > max_cardinality:
+            continue
+        if cur_mask is not None and pri_mask is not None:
+            cur_n = int((nonnull & cur_mask).sum())
+            pri_n = int((nonnull & pri_mask).sum())
+            if cur_n < min_coverage_rows or pri_n < min_coverage_rows:
+                continue
+            coverage = cur_n + pri_n
+        else:
+            coverage = int(nonnull.sum())
+            if coverage < min_coverage_rows:
+                continue
+        candidates.append({"column": col, "unique": int(uniq), "coverage": coverage})
+    candidates.sort(key=lambda c: (-c["coverage"], c["unique"], c["column"]))
+    return candidates
+
+
+def suggest_breakdown_dimensions(pri: dict, df: pd.DataFrame, schema_str: str,
+                                 period: dict) -> dict | None:
+    """One LLM call choosing ONE breakdown dimension for the priority, restricted to
+    categorical schema columns with data in both windows. An invalid or absent LLM pick
+    falls back to the top data-backed candidate — never a fabricated column."""
+    candidates = _categorical_dimension_candidates(df, period)
+    if not candidates:
+        return None
+    cand_names = [c["column"] for c in candidates]
+    cand_lines = "\n".join(f"  - {c['column']} ({c['unique']} distinct values)" for c in candidates)
+    metric_lines = "\n".join(
+        f"  - {k.get('name', '')}: {k.get('measurement', '')}" for _, k in _iter_priority_metrics(pri))
+    eq = pri.get("executive_questions") or []
+    prompt = prompts.format(
+        prompts.load("dimension_suggestion_prompt.md"),
+        priority_name=pri.get("name", ""),
+        priority_description=pri.get("description", ""),
+        executive_questions="\n".join(f"  - {q}" for q in eq),
+        metric_names=metric_lines,
+        candidates=cand_lines,
+    )
+    pick = None
+    try:
+        raw = llm.ask_json(prompt, system_context="You are a BI analyst. Return ONLY a JSON object.")
+        pick = raw[0] if isinstance(raw, list) and raw else raw
+    except Exception:
+        pick = None
+    if isinstance(pick, dict):
+        col = str(pick.get("column", "")).strip()
+        if col in cand_names:
+            return {"column": col, "rationale": str(pick.get("rationale", "")).strip()[:200]}
+    fallback = candidates[0]
+    return {"column": fallback["column"], "rationale": "Auto-selected: highest data coverage across both periods."}
+
+
+def compute_priority_breakdowns(pri: dict, df: pd.DataFrame, values: dict,
+                                period: dict, dimension: dict) -> dict:
+    """Per-member metric values for one dimension, reusing each computed metric's stored
+    spec. Returns {dimension_column: {metric_name: [{member, current, prior, delta, unit,
+    basis, status, verified}]}}."""
+    dcol = str(dimension.get("column", "")) if isinstance(dimension, dict) else str(dimension or "")
+    if not dcol or dcol not in df.columns:
+        return {}
+    members = dimension.get("members") if isinstance(dimension, dict) else None
+    if not members:
+        members = _dimension_members(df, dcol)
+    out: dict = {}
+    for mname, rec in (values or {}).items():
+        if not isinstance(rec, dict) or rec.get("status") != "computed" or rec.get("value") is None:
+            continue
+        spec = rec.get("spec")
+        if not isinstance(spec, dict):
+            continue
+        cells = []
+        for member in members:
+            sub = df[df[dcol].astype(str) == str(member)]
+            cell = _breakdown_cell(sub, period, spec, rec)
+            cell["member"] = member
+            cells.append(cell)
+        out[mname] = cells
+    if not out:
+        return {}
+    return {dcol: out}
+
+
 def compute_priority_values(pri: dict, df: pd.DataFrame, schema_str: str,
                             existing: dict = None, on_progress: callable = None) -> dict:
-    """Resolve every KPI + supporting metric in `pri` to ONE scalar and persist the structure.
+    """Resolve every KPI + operational metric in `pri` to ONE scalar and persist the structure.
 
-    Per executive question: one compact LLM spec call (not a giant script), then a
-    deterministic template (`build_metric_script`) builds and runs the pandas code.
-    A bad spec fails one metric, not the whole run.
+    Per metric group (a KPI and its operational metrics): one compact LLM spec call
+    (not a giant script), then a deterministic template (`build_metric_script`) builds
+    and runs the pandas code. A bad spec fails one metric, not the whole run.
 
     `existing` reuses already-recorded metric values (resume of a partial run); records
     with a final status are treated as done and never recomputed. `on_progress`, if given,
-    is called after each executive question with the full result structure so the caller
-    can persist incrementally (Ctrl+C keeps completed questions).
+    is called after each group with the full result structure so the caller can persist
+    incrementally (Ctrl+C keeps completed groups).
     """
     print("  Resolving time period...", flush=True)
     period = resolve_period(df, schema_str)
@@ -1014,33 +1434,29 @@ def compute_priority_values(pri: dict, df: pd.DataFrame, schema_str: str,
         mname = str(k.get("name", ""))
         if not mname or mname in values:
             continue
-        reason, missing_prim = _non_scalar_reason(k.get("measurement", ""))
+        reason, missing_prim = _precheck_measurement(k.get("measurement", ""), period, df)
         if reason:
-            values[mname] = {
-                "filters": [],
-                "value": None,
-                "unit": "",
-                "basis": "",
-                "period": period["current_period"],
-                "measurement": k.get("measurement", ""),
-                "spec": None,
-                "verified": False,
-                "status": "not_computable",
-                "reason": reason,
-                "missing_primitive": missing_prim,
-            }
+            values[mname] = _nc_record(period, k.get("measurement", ""), reason, missing_prim=missing_prim)
             prefiltered[mname] = reason
 
     eqs = pri.get("executive_questions") or []
     groups = []
-    for eq in eqs:
-        group = [k for k in (eq.get("kpis", []) + eq.get("supporting_metrics", [])) if k.get("name")]
-        if group:
-            groups.append(group)
+    kpis = pri.get("kpis", [])
+    if kpis:
+        # New model: one group per KPI (the KPI + its operational metrics share the spec context).
+        for k in kpis:
+            group = [k] + [op for op in k.get("operational_metrics", []) if op.get("name")]
+            if group:
+                groups.append(group)
+    elif eqs and isinstance(eqs[0], dict):
+        for eq in eqs:
+            group = [k for k in (eq.get("kpis", []) + eq.get("supporting_metrics", [])) if k.get("name")]
+            if group:
+                groups.append(group)
     if not groups and metrics:
         groups.append(metrics)
 
-    print(f"  Metrics: {len(metrics)} across {len(groups)} executive question(s).", flush=True)
+    print(f"  Metrics: {len(metrics)} across {len(groups)} group(s).", flush=True)
     if prefiltered:
         print(f"  Pre-filtered {len(prefiltered)} data-limited metric(s) (missing primitive): "
               f"{', '.join(sorted(prefiltered))}", flush=True)
@@ -1065,6 +1481,7 @@ def compute_priority_values(pri: dict, df: pd.DataFrame, schema_str: str,
                 pri.get("name", ""): {
                     "priority_ref": pri.get("name", ""),
                     "fingerprint": priority_fingerprint(pri),
+                    "engine_version": COMPUTE_ENGINE_VERSION,
                     "values": values,
                 }
             },
@@ -1100,29 +1517,26 @@ def compute_priority_values(pri: dict, df: pd.DataFrame, schema_str: str,
                     f"{err_lines}\n"
                     "Re-emit specs ONLY for the metrics above (exact names), following the schema."
                 )
-            print(f"  EQ {gi}/{len(groups)} attempt {attempt}: generating specs for {len(missing)} metric(s)...", flush=True)
+            print(f"  Group {gi}/{len(groups)} attempt {attempt}: generating specs for {len(missing)} metric(s)...", flush=True)
             raw = llm.ask_json(prompt, system_context="You are a data analyst. Return ONLY a JSON array of specs.",
-                               label=f"Generating specs (EQ {gi})")
+                               label=f"Generating specs (Group {gi})")
             specs = _parse_specs(raw)
             returned_names = {str(s.get("name", "")) for s in specs}
 
             omitted = [m for m in missing if m not in returned_names]
-            for m in omitted:
-                values[m] = {
-                    "filters": [],
-                    "value": None,
-                    "unit": "",
-                    "basis": "",
-                    "period": period["current_period"],
-                    "measurement": measurements.get(m, ""),
-                    "spec": None,
-                    "verified": False,
-                    "status": "not_computable",
-                    "reason": "LLM could not express this measurement as a scalar spec (omitted)",
-                }
-                missing.remove(m)
             if omitted:
-                print(f"    {len(omitted)} metric(s) inexpressible as scalar specs; marked not_computable.", flush=True)
+                if attempt == 1:
+                    for m in omitted:
+                        reasons[m] = "LLM could not express this measurement as a scalar spec (omitted)"
+                    print(f"    {len(omitted)} metric(s) omitted this attempt; retrying in repair pass.", flush=True)
+                else:
+                    for m in omitted:
+                        values[m] = _nc_record(
+                            period, measurements.get(m, ""),
+                            "LLM could not express this measurement as a scalar spec (omitted)",
+                        )
+                        missing.remove(m)
+                    print(f"    {len(omitted)} metric(s) inexpressible as scalar specs; marked not_computable.", flush=True)
 
             valid = []
             for spec in specs:
@@ -1139,18 +1553,9 @@ def compute_priority_values(pri: dict, df: pd.DataFrame, schema_str: str,
                     print(f"    No valid specs this attempt; repairing {len(missing)} metric(s)...", flush=True)
                     continue
                 for m in missing:
-                    values[m] = {
-                        "filters": [],
-                        "value": None,
-                        "unit": "",
-                        "basis": "",
-                        "period": period["current_period"],
-                        "measurement": measurements.get(m, ""),
-                        "spec": None,
-                        "verified": False,
-                        "status": "not_computable",
-                        "reason": reasons.get(m, "no valid spec produced"),
-                    }
+                    values[m] = _nc_record(
+                        period, measurements.get(m, ""), reasons.get(m, "no valid spec produced"),
+                    )
                 break
             code = build_metric_script(valid, period)
             print(f"    Running deterministic script ({len(valid)} metric(s))...", flush=True)
@@ -1173,18 +1578,13 @@ def compute_priority_values(pri: dict, df: pd.DataFrame, schema_str: str,
                 is_custom = (spec_by_name.get(mname) or {}).get("kind") == "custom"
                 source = "custom" if is_custom else None
                 if isinstance(rec, dict) and rec.get("value") is None:
-                    values[mname] = {
-                        "filters": [],
-                        "value": None,
-                        "unit": str(rec.get("unit", "")),
-                        "basis": str(rec.get("basis", "")),
-                        "period": period["current_period"],
-                        "measurement": k.get("measurement", ""),
-                        "spec": dict(spec_by_name.get(mname) or {}),
-                        "verified": False,
-                        "status": "not_computable",
-                        "reason": rec.get("null_reason") or "template returned null (e.g. empty prior period / division by zero)",
-                    }
+                    values[mname] = _nc_record(
+                        period, k.get("measurement", ""),
+                        rec.get("null_reason") or "template returned null (e.g. empty prior period / division by zero)",
+                        spec=dict(spec_by_name.get(mname) or {}),
+                        basis=str(rec.get("basis", "")),
+                        unit=str(rec.get("unit", "")),
+                    )
                     if source:
                         values[mname]["source"] = source
                     missing.remove(mname)
@@ -1218,18 +1618,10 @@ def compute_priority_values(pri: dict, df: pd.DataFrame, schema_str: str,
         mname = str(k.get("name", ""))
         if mname in values:
             continue
-        values[mname] = {
-            "filters": [],
-            "value": None,
-            "unit": "",
-            "basis": "",
-            "period": period["current_period"],
-            "measurement": k.get("measurement", ""),
-            "spec": None,
-            "verified": False,
-            "status": "error" if mname in errored else "not_computable",
-            "reason": reasons.get(mname, "no value produced"),
-        }
+        reason = reasons.get(mname, "no value produced")
+        values[mname] = _nc_record(period, k.get("measurement", ""), reason)
+        if mname in errored:
+            values[mname]["status"] = "error"
 
     computed = sum(1 for v in values.values() if v.get("status") == "computed")
     failed = len(values) - computed
@@ -1303,6 +1695,8 @@ def _aggregate(df: pd.DataFrame, mask, sub: dict):
         return float(v.sum())
     if agg == "mean":
         return float(v.mean())
+    if agg == "median":
+        return float(v.median())
     if agg == "std":
         return float(v.std())
     return None
@@ -1311,7 +1705,7 @@ def _aggregate(df: pd.DataFrame, mask, sub: dict):
 def _recomputable_spec(spec: dict) -> bool:
     if spec.get("kind") == "custom" or spec.get("steps") or spec.get("prep") or spec.get("input_ref"):
         return False
-    return spec.get("agg") in ("count", "sum", "mean", "std", "count_distinct", "ratio", "share")
+    return spec.get("agg") in ("count", "sum", "mean", "median", "std", "count_distinct", "ratio", "share")
 
 
 def _period_masks(df: pd.DataFrame, period: dict) -> tuple:
@@ -1343,16 +1737,21 @@ def _recompute_value(df: pd.DataFrame, period: dict, spec: dict):
     compare = spec.get("compare", "level")
     cur_mask, pri_mask = _period_masks(df, period)
 
-    if agg in ("count", "sum", "mean", "std", "count_distinct"):
+    if agg in ("count", "sum", "mean", "median", "std", "count_distinct"):
         sub = {"agg": agg, "value_column": spec.get("value_column"), "condition": spec.get("condition")}
         _c = _aggregate(df, cur_mask, sub)
         _p = _aggregate(df, pri_mask, sub) if compare != "level" else None
     else:
-        num = spec.get("numerator") or {"agg": "sum", "value_column": spec.get("value_column"),
-                                        "condition": spec.get("condition")}
-        den = spec.get("denominator")
-        if den is None and agg == "share":
-            den = {"agg": "sum", "value_column": spec.get("value_column"), "condition": None}
+        vcol = spec.get("value_column")
+        if agg == "share" and vcol is None:
+            num = spec.get("numerator") or {"agg": "count", "condition": spec.get("condition")}
+            den = spec.get("denominator") or {"agg": "count", "condition": None}
+        else:
+            num = spec.get("numerator") or {"agg": "sum", "value_column": vcol,
+                                            "condition": spec.get("condition")}
+            den = spec.get("denominator")
+            if den is None and agg == "share":
+                den = {"agg": "sum", "value_column": vcol, "condition": None}
         _cn = _aggregate(df, cur_mask, num)
         _cd = _aggregate(df, cur_mask, den)
         _c = (_cn / _cd) if (_cd is not None and _cd != 0) else None
@@ -1519,12 +1918,13 @@ def verify_priority_values(pri: dict, df: pd.DataFrame, values: dict, period: di
     return updated
 
 
-def interpret_priority(pri: dict, values: dict) -> str:
-    """Quick tier: one LLM call narrating stored values. Returns a plain-text narrative."""
+def interpret_priority(pri: dict, values: dict, breakdowns: dict = None) -> str:
+    """Quick tier: one LLM call narrating stored values (+ dimension breakdowns)."""
     prompt = prompts.format(
         prompts.load("interpret_priority_prompt.md"),
         priority_name=pri.get("name", ""),
         priority_description=pri.get("description", ""),
         values=json.dumps(values, ensure_ascii=False, indent=2),
+        breakdowns=json.dumps(breakdowns or {}, ensure_ascii=False, indent=2),
     )
     return llm.ask(prompt, system_context="You are a business analyst.").strip()

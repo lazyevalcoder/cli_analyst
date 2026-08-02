@@ -35,7 +35,7 @@ The pre-filter (`_non_scalar_reason`) catches these by keyword and marks them `n
 Each operator is a pure function over `(df, period)` → scalar or vector, compiled by the template. The set is deliberately small and versioned; adding one is a reviewed, tested event (see *Governance*).
 
 ### Aggregate (existing, retained)
-`count`, `sum`, `mean`, `std`, `ratio` (num/denom), `share` (num as share of denom), `topk_share`.
+`count`, `sum`, `mean`, `median`, `std`, `ratio` (num/denom), `share` (num as share of denom), `topk_share`.
 
 ### Derive — L2 restricted expressions (new)
 Adds a column to the per-EQ `prep` namespace before metrics consume it:
@@ -112,6 +112,7 @@ Back-compatible: a spec with no `prep`/`steps` behaves exactly like today (singl
 ### Validator changes (`_validate_spec`)
 - Validate operator names against the catalog; validate `group_by`/`value` are real schema columns **or** `prep`-derived names; validate `outer_agg`/`inner_agg` enums; validate fractional `k ∈ (0,1]` for topk_share; compile-check L2 `expr` via AST (reuse `sandbox._check_ast_safe`).
 - `prep` op output names must not collide with real columns; a metric may only reference `prep` outputs declared *earlier* in its own spec or in the EQ's shared prep.
+- **Closed surface (2026-08-02).** FORM-1 `agg` may target a `prep`-derived column (scalar mean/median/sum over a date difference — closes "mean(difference between A and B)"); a `group` step accepts `group_by: null` as a whole-frame single group; `share` with `value_column: null` is a **count share** (numerator = count where condition, denominator = total count — closes "share of orders using X"); `median` joined `_AGGS`/`_INNER_AGGS`/`_OUTER_AGGS` and the executor + L1 re-derivation. `test_spec_expressibility.py` locks every expressible shape so a future DSL regression fails CI instead of surfacing as an honest-but-wrong `not_computable`.
 
 ### Pre-filter becomes a classifier with a reason, not a wall
 `_non_scalar_reason` stays, but its output gains structure: `not_computable` records carry a machine-readable `missing_primitive` field (e.g. `"group.outer_agg"`, `"distinct_window"`, `"requires stage-entry timestamps"`). This turns `not_computable` into the **operator backlog** — developers see exactly which primitive to add or which data grain to provide.

@@ -70,7 +70,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "lookup_metric",
-            "description": "Look up a metric definition from the project's metric catalog. Returns the precise business formula and description for any KPI or supporting metric. Use this to get exact formulas instead of guessing.",
+            "description": "Look up a metric definition from the project's metric catalog. Returns the precise business formula and description for any KPI or operational metric. Use this to get exact formulas instead of guessing.",
             "parameters": {
                 "type": "object",
                 "properties": {

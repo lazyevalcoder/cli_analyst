@@ -95,9 +95,9 @@ class AnalystShell(cmd.Cmd):
             print("  Next: use 'init' to build knowledge graphs.")
         else:
             if p.priorities:
-                eq_total = sum(len(pri.get("executive_questions", [])) for pri in p.priorities)
-                eq_info = f", {eq_total} questions" if eq_total else ""
-                print(f"  Priorities: {len(p.priorities)} defined{eq_info}. Use 'priorities' to view.")
+                kpi_total = sum(len(pri.get("kpis", [])) for pri in p.priorities)
+                kpi_info = f", {kpi_total} KPIs" if kpi_total else ""
+                print(f"  Priorities: {len(p.priorities)} defined{kpi_info}. Use 'priorities' to view.")
             if p.custom_instructions:
                 print(f"  Custom instructions: {len(p.custom_instructions)} saved.")
             if p.current_analysis:
@@ -203,17 +203,17 @@ class AnalystShell(cmd.Cmd):
         fw_cached = "(disk)" if (p.metadata_dir / "reasoning_framework.json").exists() else ""
         print(f"  Framework: {fw_avail} {fw_cached}")
         if p.priorities:
-            eq_total = sum(len(pri.get("executive_questions", [])) for pri in p.priorities)
-            eq_info = f", {eq_total} executive questions" if eq_total else ""
-            print(f"  Priorities: {len(p.priorities)} defined{eq_info}")
+            kpi_total = sum(len(pri.get("kpis", [])) for pri in p.priorities)
+            kpi_info = f", {kpi_total} KPIs" if kpi_total else ""
+            print(f"  Priorities: {len(p.priorities)} defined{kpi_info}")
         else:
             print("  Priorities: -")
         print(f"  Custom instructions: {len(p.custom_instructions)} saved" if p.custom_instructions else "  Custom instructions: -")
         cat_n = len(self._catalog)
         if cat_n:
             kpi_n = len(self._catalog.list("kpi"))
-            sm_n = len(self._catalog.list("supporting_metric"))
-            print(f"  Metric Catalog: {cat_n} ({kpi_n} KPIs, {sm_n} supporting)")
+            sm_n = len(self._catalog.list("operational_metric")) + len(self._catalog.list("supporting_metric"))
+            print(f"  Metric Catalog: {cat_n} ({kpi_n} KPIs, {sm_n} operational)")
         else:
             print(f"  Metric Catalog: -")
 
@@ -251,7 +251,12 @@ class AnalystShell(cmd.Cmd):
             for cmd in cmds:
                 doc = docstrings.get(cmd, "")
                 if doc:
-                    short = doc.split(" — ", 1)[-1].split("\n")[0]
+                    line = doc.split("\n")[0]
+                    if " — " in line:
+                        syntax, desc = line.split(" — ", 1)
+                        short = f"{syntax} — {desc}"
+                    else:
+                        short = line
                     print(f"    {cmd:12s} {short}")
             print()
 
@@ -507,6 +512,8 @@ class AnalystShell(cmd.Cmd):
             return False
         if (self.project.priority_values or {}).get("engine_version") != builder.COMPUTE_ENGINE_VERSION:
             return False
+        if rec.get("engine_version") != builder.COMPUTE_ENGINE_VERSION:
+            return False
         if rec.get("fingerprint") != builder.priority_fingerprint(pri):
             return False
         stored_fp = (self.project.priority_values or {}).get("data_fingerprint")
@@ -518,15 +525,52 @@ class AnalystShell(cmd.Cmd):
             return False
         return True
 
+    def _ensure_breakdowns(self, pri: dict, rec: dict) -> None:
+        """Add the dimension breakdown matrix to a stored record (values must already be
+        present). One LLM dimension-suggestion call + deterministic per-member values;
+        no-op when the record already carries breakdowns. Persists when new."""
+        if rec is None or not isinstance(rec, dict):
+            return
+        if rec.get("breakdowns") and rec.get("breakdown_dimensions"):
+            return
+        if self.df is None:
+            return
+        pname = pri.get("name", "")
+        period = self._stored_period()
+        if not period or not period.get("date_column"):
+            return
+        schema_str = builder.extract_schema(self.df)
+        try:
+            dim = builder.suggest_breakdown_dimensions(pri, self.df, schema_str, period)
+        except Exception:
+            dim = None
+        if not dim:
+            return
+        try:
+            dim["members"] = builder._dimension_members(self.df, dim["column"])
+            bd = builder.compute_priority_breakdowns(pri, self.df, rec.get("values") or {}, period, dim)
+        except Exception:
+            bd = {}
+        if not bd:
+            return
+        rec["breakdown_dimensions"] = [dim]
+        rec["breakdowns"] = bd
+        pv = dict(self.project.priority_values or {})
+        pv.setdefault("priorities", {})[pname] = rec
+        self.project.priority_values = pv
+        self.project.save()
+
     def _ensure_priority_values(self, pri: dict) -> dict:
         """Auto-compute stored values if missing or stale (def fingerprint or data fingerprint).
 
         Resumes a partial run: already-recorded metrics (final status) are kept and only
         missing ones are computed. Persists after each executive question so Ctrl+C keeps
-        completed questions.
+        completed questions. Also ensures the dimension breakdown matrix is present.
         """
         if self._priority_values_are_current(pri):
-            return self._priority_values_record(pri)
+            rec = self._priority_values_record(pri)
+            self._ensure_breakdowns(pri, rec)
+            return rec
         pname = pri.get("name", "")
         print(f"  Computing metric values for [{pname}]...")
         print("  (This makes a few LLM calls and can take a few minutes. "
@@ -538,6 +582,7 @@ class AnalystShell(cmd.Cmd):
         pv = self.project.priority_values or {}
         base_current = (
             rec is not None
+            and rec.get("engine_version") == builder.COMPUTE_ENGINE_VERSION
             and pv.get("engine_version") == builder.COMPUTE_ENGINE_VERSION
             and rec.get("fingerprint") == builder.priority_fingerprint(pri)
             and pv.get("data_fingerprint") == builder.data_fingerprint(self.df)
@@ -559,8 +604,10 @@ class AnalystShell(cmd.Cmd):
         result = builder.compute_priority_values(pri, self.df, schema_str,
                                                  existing=existing, on_progress=persist)
         persist(result)
-        print(f"  Stored {len(result.get('priorities', {}).get(pname, {}).get('values', {}))} metric values.")
-        return result["priorities"].get(pname, {})
+        prec = result["priorities"].get(pname, {})
+        self._ensure_breakdowns(pri, prec)
+        print(f"  Stored {len(prec.get('values', {}))} metric values.")
+        return prec
 
     def _print_priority_values(self, pri: dict):
         rec = self._priority_values_record(pri)
@@ -578,13 +625,41 @@ class AnalystShell(cmd.Cmd):
             status = v.get("status", "")
             verified = "verified" if v.get("verified") else "UNVERIFIED"
             basis = v.get("basis", "")
-            reason = v.get("reason", "")
+            reason = v.get("reason_display") or builder.friendly_reason(v.get("reason", ""))
             print(f"    {mname}: {value} {unit}".rstrip())
             print(f"      [{status} | {verified}]")
             if basis:
                 print(f"      basis: {basis}")
             if reason:
                 print(f"      reason: {reason}")
+        self._print_breakdown_matrix(rec)
+
+    def _print_breakdown_matrix(self, rec: dict) -> None:
+        """Print the metrics-in-rows x members-in-columns breakdown table per dimension."""
+        bdims = rec.get("breakdown_dimensions") or []
+        for bdim in bdims:
+            col = str(bdim.get("column", ""))
+            bvals = (rec.get("breakdowns") or {}).get(col) or {}
+            members = bdim.get("members") or []
+            if not members or not bvals:
+                continue
+            print(f"\n  Breakdown by {col}:")
+            widths = {m: max(len(m), 7) for m in members}
+            print("    " + "Metric".ljust(38) + "".join(m.ljust(widths[m]) for m in members))
+            any_nc = False
+            for mname, cells in bvals.items():
+                bym = {c.get("member"): c for c in cells}
+                row = "    " + str(mname)[:36].ljust(38)
+                for m in members:
+                    c = bym.get(m)
+                    if c and c.get("status") == "computed" and c.get("delta") is not None:
+                        row += f"{c['delta']:.3g}".ljust(widths[m])
+                    else:
+                        row += "—".ljust(widths[m])
+                        any_nc = True
+                print(row)
+            if any_nc:
+                print("    — = not computable for that member (no baseline / no data)")
 
     def _verify_priority_values(self, pri: dict) -> None:
         """Run the full verification stack for a priority and persist the verdicts.
@@ -612,11 +687,14 @@ class AnalystShell(cmd.Cmd):
         if llm_failed:
             print(f"  L2 semantic check flagged {len(llm_failed)} metric(s): {', '.join(sorted(llm_failed))}")
         self.project.priority_values = dict(self.project.priority_values or {})
-        self.project.priority_values.setdefault("priorities", {})[pname] = {
+        stored_rec = dict(rec or {})
+        stored_rec.update({
             "priority_ref": pname,
-            "fingerprint": rec.get("fingerprint", builder.priority_fingerprint(pri)),
+            "fingerprint": stored_rec.get("fingerprint", builder.priority_fingerprint(pri)),
+            "engine_version": stored_rec.get("engine_version", builder.COMPUTE_ENGINE_VERSION),
             "values": values,
-        }
+        })
+        self.project.priority_values.setdefault("priorities", {})[pname] = stored_rec
         self.project.save()
         print(f"  Verified {verified_n}/{len(checked)} computed metric(s). "
               "Use 'priorities values <n>' to review per-metric verdicts.")
@@ -624,7 +702,8 @@ class AnalystShell(cmd.Cmd):
     def do_priorities(self, arg):
         """priorities [regenerate|analyze|show|compute|verify|interpret|values] — Strategic priorities for this dataset
 
-    Each priority contains 2-5 executive questions with KPIs and supporting metrics.
+    Each priority is an outcome with executive questions (framing), delta-focused KPIs,
+    and operational metrics (drivers) per KPI.
 
     Subcommands:
       priorities                           Show all priorities with executive questions
@@ -648,9 +727,14 @@ class AnalystShell(cmd.Cmd):
             schema_str = builder.extract_schema(self.df)
             print("  Regenerating strategic priorities...", end="", flush=True)
             try:
-                priorities = builder.identify_priorities(schema_str, self.project.structural_kg, self.project.diagnostic_kg)
+                framework = builder.identify_priorities(schema_str, self.project.structural_kg, self.project.diagnostic_kg)
+                priorities = framework.get("priorities", [])
                 if priorities:
                     self.project.priorities = priorities
+                    self.project.priority_framework = {
+                        "domain": framework.get("domain", ""),
+                        "health_indicators": framework.get("health_indicators", []),
+                    }
                     self.project.priority_values = {}
                     self.project.save()
                     self._catalog = KnowledgeGraph.build_from(priorities)
@@ -691,20 +775,21 @@ class AnalystShell(cmd.Cmd):
             pri = self.project.priorities[idx]
             pname = pri.get("name", f"priority-{idx+1}")
             eqs = pri.get("executive_questions", [])
+            kpis = pri.get("kpis", [])
+            eq_section = ""
             if eqs:
-                eq_lines = [f"{j}. {eq.get('question', '?')}" for j, eq in enumerate(eqs, 1)]
-                eq_section = " Executive questions:\n" + "\n".join(f"  - {l}" for l in eq_lines)
-                question = (
-                    f"Strategic analysis: {pri.get('description', pname)}. "
-                    f"Focus areas: {pri.get('focus_areas', '')}.{eq_section}"
-                ).strip()
-            else:
-                kpi_names = [k.get("name", "") for k in pri.get("kpis", [])]
-                kpi_section = f" KPIs to track: {', '.join(kpi_names)}." if kpi_names else ""
-                question = (
-                    f"Strategic analysis: {pri.get('description', pname)}. "
-                    f"Focus areas: {pri.get('focus_areas', '')}.{kpi_section}"
-                ).strip()
+                eq_list = eqs if isinstance(eqs[0], str) else [eq.get("question", "?") for eq in eqs if isinstance(eq, dict)]
+                if eq_list:
+                    eq_lines = [f"{j}. {q}" for j, q in enumerate(eq_list, 1)]
+                    eq_section = " Executive questions:\n" + "\n".join(f"  - {l}" for l in eq_lines)
+            kpi_section = ""
+            if kpis:
+                kpi_names = [k.get("name", "") for k in kpis if k.get("name")]
+                if kpi_names:
+                    kpi_section = f" KPIs to track: {', '.join(kpi_names)}."
+            question = (
+                f"Strategic analysis: {pri.get('description', pname)}.{eq_section}{kpi_section}"
+            ).strip()
 
             slug = _unique_slug(f"_priority-{_make_slug(pname)}", self._existing_analyses())
             analysis_dir = self.project.analyses_dir / slug
@@ -833,9 +918,10 @@ class AnalystShell(cmd.Cmd):
                 print("\n  Compute interrupted.")
                 return
             values = (values_rec or {}).get("values", {}) if values_rec else {}
+            breakdowns = (values_rec or {}).get("breakdowns") or {}
             print(f"  Interpreting [{pname}]...")
             try:
-                summary = builder.interpret_priority(pri, values)
+                summary = builder.interpret_priority(pri, values, breakdowns)
             except KeyboardInterrupt:
                 self.project.save()
                 print("\n  Interpret interrupted.")
@@ -891,62 +977,98 @@ class AnalystShell(cmd.Cmd):
             summary = pri.get("analysis_summary", "")
             slug = pri.get("analysis_slug", "")
             eqs = pri.get("executive_questions", [])
+            kpis = pri.get("kpis", [])
+            fw = self.project.priority_framework or {}
 
             print(f"\n  Priority: {pname}")
             print(f"  {pri.get('description', '')}")
-            if pri.get("focus_areas"):
-                print(f"  Focus: {pri.get('focus_areas', '')}")
+            if fw.get("domain"):
+                print(f"  Domain: {fw.get('domain')}")
 
-            if eqs:
+            if kpis:
+                if eqs and not (eqs and isinstance(eqs[0], dict)):
+                    print(f"\n  Executive questions (framing):")
+                    for q in eqs:
+                        print(f"    • {q}")
+                for k in kpis:
+                    kn = k.get("name", "?")
+                    km = k.get("metric", "")
+                    kd = k.get("description", "")
+                    kmeas = k.get("measurement", "")
+                    lenses = k.get("analytical_lenses", [])
+                    ops = k.get("operational_metrics", [])
+                    print(f"\n  KPI: {kn} ({km})")
+                    if kd:
+                        print(f"    {kd}")
+                    if kmeas:
+                        print(f"    Measurement: {kmeas}")
+                    if lenses:
+                        print(f"    Analytical lenses: {', '.join(lenses)}")
+                    if ops:
+                        print(f"    Operational metrics (drivers):")
+                        for op in ops:
+                            on = op.get("name", "?")
+                            om = op.get("metric", "")
+                            od = op.get("description", "")
+                            omeas = op.get("measurement", "")
+                            print(f"      {on} ({om})")
+                            if od:
+                                print(f"        {od}")
+                            if omeas:
+                                print(f"        Measurement: {omeas}")
+            elif eqs and isinstance(eqs[0], dict):
                 for j, eq in enumerate(eqs, 1):
                     qtext = eq.get("question", "?")
-                    kpis = eq.get("kpis", [])
-                    supporting = eq.get("supporting_metrics", [])
+                    qkpis = eq.get("kpis", [])
+                    qops = eq.get("supporting_metrics", [])
                     print(f"\n  Executive Question {j}: {qtext}")
 
-                    if kpis:
+                    if qkpis:
                         print(f"    KPIs (outcome measures):")
-                        for k in kpis:
+                        for k in qkpis:
                             kn = k.get("name", "?")
                             km = k.get("metric", "")
                             kd = k.get("description", "")
                             kmeas = k.get("measurement", "")
                             print(f"      {kn} ({km})")
-                            print(f"        {kd}")
+                            if kd:
+                                print(f"        {kd}")
                             if kmeas:
                                 print(f"        Measurement: {kmeas}")
 
-                    if supporting:
-                        print(f"    Supporting Metrics (driver/context):")
-                        for s in supporting:
+                    if qops:
+                        print(f"    Operational Metrics (driver/context):")
+                        for s in qops:
                             sn = s.get("name", "?")
                             sm = s.get("metric", "")
                             sd = s.get("description", "")
                             smeas = s.get("measurement", "")
                             inf = s.get("influences", [])
                             print(f"      {sn} ({sm})")
-                            print(f"        {sd}")
+                            if sd:
+                                print(f"        {sd}")
                             if smeas:
                                 print(f"        Measurement: {smeas}")
                             if inf:
                                 print(f"        Influences: {', '.join(inf)}")
-            else:
-                kpis = pri.get("kpis", [])
+            elif pri.get("kpis") or pri.get("supporting_metrics"):
+                flat_kpis = pri.get("kpis", [])
                 supporting = pri.get("supporting_metrics", [])
-                if kpis:
+                if flat_kpis:
                     print(f"\n  KPIs (outcome measures):")
-                    for k in kpis:
+                    for k in flat_kpis:
                         kn = k.get("name", "?")
                         km = k.get("metric", "")
                         kd = k.get("description", "")
                         kmeas = k.get("measurement", "")
                         print(f"    {kn} ({km})")
-                        print(f"      {kd}")
+                        if kd:
+                            print(f"      {kd}")
                         if kmeas:
                             print(f"      Measurement: {kmeas}")
 
                 if supporting:
-                    print(f"\n  Supporting Metrics (driver/context):")
+                    print(f"\n  Operational Metrics (driver/context):")
                     for s in supporting:
                         sn = s.get("name", "?")
                         sm = s.get("metric", "")
@@ -954,14 +1076,14 @@ class AnalystShell(cmd.Cmd):
                         smeas = s.get("measurement", "")
                         inf = s.get("influences", [])
                         print(f"    {sn} ({sm})")
-                        print(f"      {sd}")
+                        if sd:
+                            print(f"      {sd}")
                         if smeas:
                             print(f"      Measurement: {smeas}")
                         if inf:
                             print(f"      Influences: {', '.join(inf)}")
-
-                if not kpis and not supporting:
-                    print(f"\n  (Run 'priorities regenerate' for KPI-enriched view)")
+            else:
+                print(f"\n  (Run 'priorities regenerate' for the KPI-enriched view)")
 
             rec = self._priority_values_record(pri)
             if rec:
@@ -973,7 +1095,11 @@ class AnalystShell(cmd.Cmd):
                 for mname, v in values.items():
                     status = v.get("status", "")
                     verified = "verified" if v.get("verified") else "UNVERIFIED"
-                    print(f"    {mname}: {v.get('value')} {v.get('unit', '')} [{status} | {verified}]".rstrip())
+                    if status == "not_computable":
+                        reason = v.get("reason_display") or builder.friendly_reason(v.get("reason", ""))
+                        print(f"    {mname}: NOT COMPUTED — {reason}")
+                    else:
+                        print(f"    {mname}: {v.get('value')} {v.get('unit', '')} [{status} | {verified}]".rstrip())
 
             interp = pri.get("interpretation_summary", "")
             if interp:
@@ -1000,18 +1126,38 @@ class AnalystShell(cmd.Cmd):
             return
 
         print(f"\n  Strategic Priorities for {p.name}:")
+        fw = p.priority_framework or {}
+        if fw.get("domain"):
+            print(f"  Domain: {fw.get('domain')}")
+        selected = [h.get("name", "") for h in fw.get("health_indicators", []) if h.get("selected")]
+        if selected:
+            print(f"  Health indicators (selected): {', '.join(selected)}")
         for i, pri in enumerate(p.priorities, 1):
             name = pri.get("name", "?")
             desc = pri.get("description", "")
-            focus = pri.get("focus_areas", "")
             analyzed = pri.get("analysis_summary", "")
             eqs = pri.get("executive_questions", [])
+            kpis = pri.get("kpis", [])
 
             print(f"\n  {i}. {name}")
             if desc:
                 print(f"     {desc}")
 
-            if eqs:
+            if kpis:
+                if eqs and not (eqs and isinstance(eqs[0], dict)):
+                    for j, q in enumerate(eqs, 1):
+                        print(f"     Q{j}: {q}")
+                for k in kpis:
+                    kn = k.get("name", "?")
+                    op_names = [op.get("name", "?") for op in k.get("operational_metrics", [])]
+                    line = f"     KPI: {kn}"
+                    if op_names:
+                        op_str = ", ".join(op_names[:3])
+                        if len(op_names) > 3:
+                            op_str += f" (+{len(op_names) - 3} more)"
+                        line += f"  drivers: {op_str}"
+                    print(line)
+            elif eqs and isinstance(eqs[0], dict):
                 for j, eq in enumerate(eqs, 1):
                     qtext = eq.get("question", "?")
                     kpi_names = [k.get("name", "?") for k in eq.get("kpis", [])]
@@ -1024,24 +1170,22 @@ class AnalystShell(cmd.Cmd):
                         sm_str = ", ".join(sm_names[:3])
                         if len(sm_names) > 3:
                             sm_str += f" (+{len(sm_names) - 3} more)"
-                        print(f"        Supporting: {sm_str}")
+                        print(f"        Drivers: {sm_str}")
             else:
-                kpis = pri.get("kpis", [])
+                flat_kpis = pri.get("kpis", [])
                 supporting = pri.get("supporting_metrics", [])
-                if kpis:
-                    kpi_str = ", ".join(k.get("name", "?") for k in kpis)
+                if flat_kpis:
+                    kpi_str = ", ".join(k.get("name", "?") for k in flat_kpis)
                     print(f"     KPIs: {kpi_str}")
                 if supporting:
                     sm_top = supporting[:5]
                     sm_str = ", ".join(s.get("name", "?") for s in sm_top)
                     if len(supporting) > 5:
                         sm_str += f" (+{len(supporting) - 5} more)"
-                    print(f"     Supporting Metrics: {sm_str}")
-                if not kpis and not supporting:
-                    print(f"     (\u2192 Run 'priorities regenerate' for KPI-enriched view)")
+                    print(f"     Drivers: {sm_str}")
+                if not flat_kpis and not supporting:
+                    print(f"     (\u2192 Run 'priorities regenerate' for the KPI-enriched view)")
 
-            if focus:
-                print(f"     Focus: {focus}")
             if analyzed:
                 slug_link = pri.get("analysis_slug", "?")
                 print(f'     \u2192 \u2713 Analyzed (use "priorities show {i}" or "review {slug_link}")')
@@ -1050,12 +1194,22 @@ class AnalystShell(cmd.Cmd):
         print()
 
     def do_metrics(self, arg):
-        """metrics [kpis|supporting] — List metric catalog entries"""
+        """metrics [kpis|operational] — List metric catalog entries"""
         sub = arg.strip().lower()
-        kind_map = {"kpis": "kpi", "supporting": "supporting_metric"}
-        kind = kind_map.get(sub, None)
+        if sub in ("kpis", "kpi"):
+            kind = "kpi"
+        elif sub in ("operational", "operational_metrics", "supporting"):
+            kind = "operational"
+        else:
+            kind = None
 
-        entries = self._catalog.list(kind)
+        if kind == "kpi":
+            entries = self._catalog.list("kpi")
+        elif kind == "operational":
+            entries = self._catalog.list("operational_metric") + self._catalog.list("supporting_metric")
+        else:
+            entries = self._catalog.list()
+
         if not entries:
             print("  Metric catalog is empty.")
             if self.project.priorities:
@@ -1064,18 +1218,20 @@ class AnalystShell(cmd.Cmd):
                 print("  Use 'init' to generate priorities and populate the catalog.")
             return
 
-        if kind:
-            label = "KPIs" if kind == "kpi" else "Supporting Metrics"
-            print(f"\n  {label} ({len(entries)}):")
+        if kind == "kpi":
+            label = "KPIs"
+        elif kind == "operational":
+            label = "Operational Metrics"
         else:
-            print(f"\n  Metric Catalog ({len(entries)} entries):")
+            label = "Metric Catalog"
+
+        print(f"\n  {label} ({len(entries)}):")
 
         for e in entries:
-            kind_label = "[KPI]" if e.get("type") == "kpi" else "[S]"
+            kind_label = "[KPI]" if e.get("type") == "kpi" else "[Op]"
             source_mark = " (edited)" if e.get("source") == "user-override" else ""
-            eq_text = f" | Q: {e.get('executive_question', '')[:60]}" if e.get("executive_question") else ""
             print(f"    {e.get('id', '?')}: {e.get('name', '?')} {kind_label} ({e.get('metric', '?')}){source_mark}")
-            print(f"      Priority: {e.get('priority', '')}{eq_text}")
+            print(f"      Priority: {e.get('priority', '')}")
         print()
 
     def do_metric(self, arg):
@@ -1102,11 +1258,10 @@ Fields you can edit: measurement, description
                 print(f"  Metric '{target}' not found.")
                 return
             source_mark = " (overridden by user)" if entry.get("source") == "user-override" else " (LLM-generated)"
+            kind_label = "Operational Metric" if entry.get("type") in ("operational_metric", "supporting_metric") else "KPI"
             print(f"\n  Name: {entry.get('name', '?')}{source_mark}")
-            print(f"  Kind: {entry.get('type', '?')}")
+            print(f"  Kind: {kind_label}")
             print(f"  Priority: {entry.get('priority', '')}")
-            if entry.get("executive_question"):
-                print(f"  Executive Question: {entry.get('executive_question', '')}")
             print(f"  Source Column: {entry.get('metric', '')}")
             print(f"  Description: {entry.get('description', '')}")
             print(f"  Measurement: {entry.get('measurement', '')}")

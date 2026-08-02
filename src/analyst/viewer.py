@@ -67,6 +67,8 @@ def _detect_view_type(rel_path: str) -> str | None:
         return "schema"
     if p.endswith("/metadata/priorities.json"):
         return "priorities"
+    if p.endswith("/metadata/priority_values.json"):
+        return "priority_values"
     if p.endswith("/metadata/briefing.json"):
         return "briefing"
     if p.endswith("/metadata/metric_catalog.json"):

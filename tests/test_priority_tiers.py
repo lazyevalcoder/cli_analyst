@@ -17,14 +17,13 @@ def _sample_pri():
     return {
         "name": "Growth",
         "description": "Test priority",
-        "executive_questions": [
+        "executive_questions": ["Are we growing?", "Where is growth concentrated?"],
+        "kpis": [
             {
-                "question": "Are we growing?",
-                "kpis": [
-                    {"name": "Growth", "metric": "date",
-                     "measurement": "current count vs prior count"}
-                ],
-                "supporting_metrics": [
+                "name": "Growth",
+                "metric": "date",
+                "measurement": "current count vs prior count",
+                "operational_metrics": [
                     {"name": "Deal Count", "metric": "date",
                      "measurement": "count of rows in current period"}
                 ],
@@ -142,7 +141,7 @@ class TestFingerprints:
 
     def test_priority_fingerprint_changes_on_measurement_edit(self):
         pri = _sample_pri()
-        pri["executive_questions"][0]["kpis"][0]["measurement"] = "changed formula"
+        pri["kpis"][0]["measurement"] = "changed formula"
         assert builder.priority_fingerprint(pri) != builder.priority_fingerprint(_sample_pri())
 
     def test_data_fingerprint_stable_for_same_df(self):
@@ -443,6 +442,97 @@ class TestDataLimitedPreFilter:
             assert not reason, text
 
 
+class TestComputabilityRuleBook:
+    def test_friendly_reason_maps_technical_jargon(self):
+        assert "zero" in builder.friendly_reason("no prior-period baseline (prior value is 0)")
+        assert "no earlier period" in builder.friendly_reason("no prior-period baseline (prior value is 0)")
+        assert "prior comparison period" in builder.friendly_reason(
+            "the prior comparison period contains no data, so a period-over-period change cannot be computed")
+        assert "form" in builder.friendly_reason("metric omitted or not produced in output")
+        assert "not computed" in builder.friendly_reason("some unknown reason").lower() or \
+            "some unknown reason" == builder.friendly_reason("some unknown reason")
+
+    def test_friendly_reason_never_contains_prior_value_zero(self):
+        # The raw technical string must not leak to users.
+        raw = "no prior-period baseline (prior value is 0)"
+        display = builder.friendly_reason(raw)
+        assert "prior value is 0" not in display
+        assert "prior-period" not in display
+
+    def test_delta_measurement_detection(self):
+        assert builder._is_delta_measurement("Percentage change in the count of opportunities compared to the prior period")
+        assert builder._is_delta_measurement("Revenue growth vs prior period")
+        assert not builder._is_delta_measurement("current count of active accounts")
+        assert not builder._is_delta_measurement("count of rows in current period")
+
+    def test_precheck_no_time_dimension_rejects_delta(self):
+        period = _period()
+        period["date_column"] = None
+        period["prior_start"] = None
+        reason, _ = builder._precheck_measurement(
+            "Percentage change in the count of opportunities compared to the prior period", period)
+        assert reason and "time" in reason
+
+    def test_precheck_empty_prior_window_rejects_delta(self):
+        period = _period()
+        period["prior_start"] = "2016-01-01"
+        period["prior_end"] = "2016-01-31"
+        reason, prim = builder._precheck_measurement(
+            "Percentage change in the count of opportunities compared to the prior period",
+            period, df=_sample_df())
+        assert reason and "prior comparison period" in reason
+        assert prim == "empty prior period"
+
+    def test_precheck_level_metric_not_rejected_without_time(self):
+        period = _period()
+        period["date_column"] = None
+        period["prior_start"] = None
+        reason, _ = builder._precheck_measurement("current count of active accounts", period)
+        assert not reason
+
+    def test_nc_record_carries_plain_display(self):
+        period = _period()
+        rec = builder._nc_record(period, "measurement text", "no prior-period baseline (prior value is 0)")
+        assert rec["status"] == "not_computable"
+        assert rec["reason_display"] and "prior value is 0" not in rec["reason_display"]
+
+    def test_compute_prefilters_no_time_dimension_delta(self, monkeypatch):
+        period = _period()
+        period["date_column"] = None
+        period["prior_start"] = None
+        monkeypatch.setattr(builder, "resolve_period", lambda *a, **k: period)
+        dc_spec = {
+            "name": "Deal Count", "agg": "count", "value_column": None, "condition": None,
+            "numerator": None, "denominator": None, "group_by": None, "k": None,
+            "compare": "level", "unit": "count",
+        }
+        monkeypatch.setattr(builder.llm, "ask_json", lambda *a, **k: [dc_spec])
+        result = builder.compute_priority_values(_sample_pri(), _sample_df(), "schema")
+        values = result["priorities"]["Growth"]["values"]
+        assert values["Growth"]["status"] == "not_computable"
+        assert values["Growth"].get("reason_display")
+        # Deal Count is a LEVEL count — legitimately computable without a time dimension.
+        assert values["Deal Count"]["status"] == "computed"
+
+    def test_no_substitution_never_produces_wrong_value_kind(self, monkeypatch):
+        # A % metric with an empty prior must NOT degrade to a level/raw count.
+        period = _period()
+        period["prior_start"] = "2016-01-01"
+        period["prior_end"] = "2016-01-31"
+        monkeypatch.setattr(builder, "resolve_period", lambda *a, **k: period)
+        spec = {
+            "name": "Growth", "agg": "count", "value_column": None, "condition": None,
+            "numerator": None, "denominator": None, "group_by": None, "k": None,
+            "compare": "pct_change", "unit": "count",
+        }
+        calls = iter([[spec], [spec]])
+        monkeypatch.setattr(builder.llm, "ask_json", lambda *a, **k: next(calls))
+        result = builder.compute_priority_values(_sample_pri(), _sample_df(), "schema")
+        values = result["priorities"]["Growth"]["values"]
+        assert values["Growth"]["status"] == "not_computable"
+        assert values["Growth"]["value"] is None
+
+
 class TestComputePriorityValues:
     def test_compute_ok(self, monkeypatch):
         calls = iter([_period(), _specs()])
@@ -458,11 +548,12 @@ class TestComputePriorityValues:
         assert values["Deal Count"]["status"] == "computed"
         assert values["Deal Count"]["value"] == 2
 
-    def test_compute_omitted_metric_not_repairable(self, monkeypatch):
-        # EQ1 returns only "Growth"; "Deal Count" is omitted -> immediately not_computable,
-        # NO repair re-ask for it (only invalid specs get repaired).
+    def test_compute_omitted_metric_retried_then_not_computable(self, monkeypatch):
+        # Attempt 1 omits "Deal Count" -> NOT dropped immediately; attempt 2 re-asks.
+        # Still omitted after attempt 2 -> honestly not_computable.
         calls = iter([
             _period(),
+            [_specs()[0]],
             [_specs()[0]],
         ])
         monkeypatch.setattr(builder.llm, "ask_json", lambda *a, **k: next(calls))
@@ -471,6 +562,19 @@ class TestComputePriorityValues:
         assert values["Growth"]["status"] == "computed"
         assert values["Deal Count"]["status"] == "not_computable"
         assert "scalar spec" in values["Deal Count"]["reason"]
+
+    def test_compute_omitted_metric_repaired_on_second_attempt(self, monkeypatch):
+        # Omitted on attempt 1, supplied on attempt 2 -> computed (repair pass catches it).
+        calls = iter([
+            _period(),
+            [_specs()[0]],
+            _specs(),
+        ])
+        monkeypatch.setattr(builder.llm, "ask_json", lambda *a, **k: next(calls))
+        result = builder.compute_priority_values(_sample_pri(), _sample_df(), "schema")
+        values = result["priorities"]["Growth"]["values"]
+        assert values["Growth"]["status"] == "computed"
+        assert values["Deal Count"]["status"] == "computed"
 
     def test_compute_invalid_spec_is_repaired(self, monkeypatch):
         # Attempt 1 returns a Deal Count spec that fails validation -> attempt 2 repairs it.
@@ -502,13 +606,15 @@ class TestComputePriorityValues:
         assert values["Deal Count"]["value"] == 42
         assert values["Growth"]["status"] == "computed"
 
-    def test_compute_on_progress_per_eq(self, monkeypatch):
-        # on_progress is called once per executive question with the full result dict.
+    def test_compute_on_progress_per_group(self, monkeypatch):
+        # on_progress is called once per metric group (KPI + its operational metrics)
+        # with the full result dict.
         pri = _sample_pri()
-        pri["executive_questions"].append({
-            "question": "Second question?",
-            "kpis": [{"name": "Second", "metric": "date", "measurement": "count in current period"}],
-            "supporting_metrics": [],
+        pri["kpis"].append({
+            "name": "Second",
+            "metric": "date",
+            "measurement": "count in current period",
+            "operational_metrics": [],
         })
         sec_spec = {"name": "Second", "agg": "count", "value_column": None, "condition": None,
                     "numerator": None, "denominator": None, "group_by": None, "k": None,
@@ -533,12 +639,14 @@ class TestComputePriorityValues:
         # a steps spec makes it computable instead of pre-filtered.
         pri = {
             "name": "Growth",
-            "executive_questions": [{
-                "question": "Are we growing?",
-                "kpis": [{"name": "Growth", "metric": "date",
-                          "measurement": "current count vs prior count"}],
-                "supporting_metrics": [{"name": "Per Agent", "metric": "agent",
-                                        "measurement": "Average count per agent, period-over-period change"}],
+            "kpis": [{
+                "name": "Growth",
+                "metric": "date",
+                "measurement": "current count vs prior count",
+                "operational_metrics": [
+                    {"name": "Per Agent", "metric": "agent",
+                     "measurement": "Average count per agent, period-over-period change"}
+                ],
             }],
         }
         steps_spec = {
@@ -562,12 +670,14 @@ class TestComputePriorityValues:
         # Residual data-limited measurement -> hard-filtered with missing_primitive.
         pri = {
             "name": "Growth",
-            "executive_questions": [{
-                "question": "Are we growing?",
-                "kpis": [{"name": "Growth", "metric": "date",
-                          "measurement": "current count vs prior count"}],
-                "supporting_metrics": [{"name": "Stage Velocity", "metric": "date",
-                                        "measurement": "Time-in-Stage Velocity: average days spent in each stage"}],
+            "kpis": [{
+                "name": "Growth",
+                "metric": "date",
+                "measurement": "current count vs prior count",
+                "operational_metrics": [
+                    {"name": "Stage Velocity", "metric": "date",
+                     "measurement": "Time-in-Stage Velocity: average days spent in each stage"}
+                ],
             }],
         }
         calls = iter([
@@ -584,6 +694,7 @@ class TestComputePriorityValues:
     def test_compute_missing_metric_is_not_computable(self, monkeypatch):
         calls = iter([
             _period(),
+            [_specs()[0]],
             [_specs()[0]],
         ])
         monkeypatch.setattr(builder.llm, "ask_json", lambda *a, **k: next(calls))
@@ -609,8 +720,8 @@ class TestComputePriorityValues:
         assert values["Deal Count"]["status"] == "computed"
 
     def test_compute_zero_prior_null_reason(self, monkeypatch):
-        # pct_change with an empty prior period -> null with an explicit reason, not a
-        # fabricated 0.
+        # pct_change with an empty prior period -> not computed with a plain-language
+        # reason (rule book: no substitution, no fabricated 0).
         period = _period()
         period["prior_start"] = "2016-01-01"
         period["prior_end"] = "2016-01-31"
@@ -620,7 +731,8 @@ class TestComputePriorityValues:
         result = builder.compute_priority_values(_sample_pri(), _sample_df(), "schema")
         values = result["priorities"]["Growth"]["values"]
         assert values["Growth"]["status"] == "not_computable"
-        assert values["Growth"]["reason"] == "no prior-period baseline (prior value is 0)"
+        assert values["Growth"].get("reason_display")
+        assert "prior comparison period" in values["Growth"]["reason"]
         assert values["Deal Count"]["status"] == "computed"
 
     def test_compute_persists_spec(self, monkeypatch):
@@ -859,11 +971,8 @@ class TestCustomSpec:
     def test_custom_source_flag(self, monkeypatch):
         pri = {
             "name": "Growth",
-            "executive_questions": [{
-                "question": "Q",
-                "kpis": [{"name": "Custom", "metric": "date", "measurement": "custom calc"}],
-                "supporting_metrics": [],
-            }],
+            "kpis": [{"name": "Custom", "metric": "date", "measurement": "custom calc",
+                      "operational_metrics": []}],
         }
         custom_spec = {"name": "Custom", "kind": "custom",
                        "code": "_c = float(len(df.loc[_CUR]))", "compare": "level", "unit": "count"}
@@ -939,6 +1048,7 @@ class TestEngineVersion:
             "data_fingerprint": builder.data_fingerprint(_sample_df()),
             "priorities": {"Growth": {
                 "fingerprint": builder.priority_fingerprint(_sample_pri()),
+                "engine_version": builder.COMPUTE_ENGINE_VERSION,
                 "values": {"Growth": {"status": "computed"},
                            "Deal Count": {"status": "computed"}},
             }},
@@ -1002,6 +1112,7 @@ class TestEngineVersion:
             "period_definition": "current vs prior",
             "priorities": {"Growth": {
                 "fingerprint": builder.priority_fingerprint(_sample_pri()),
+                "engine_version": builder.COMPUTE_ENGINE_VERSION,
                 "values": values,
             }},
         }
@@ -1142,6 +1253,7 @@ class TestVerifyTier:
             "period": {"date_column": "date", "current_start": "2026-08-01", "current_end": "2026-08-31",
                        "prior_start": "2026-01-01", "prior_end": "2026-02-28"},
             "priorities": {"Growth": {"fingerprint": builder.priority_fingerprint(_sample_pri()),
+                                      "engine_version": builder.COMPUTE_ENGINE_VERSION,
                                       "values": values}},
         }
         shell = AnalystShell.__new__(AnalystShell)

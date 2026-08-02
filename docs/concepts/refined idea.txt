@@ -1,0 +1,8 @@
+```
+1 Health indicators Table (Health Indicator | Why? | Importance). List all possible indicators and select a few important for next steps.
+1.1 Outcomes should not be nouns. Outcomes should answer "What are we trying to achieve?" Outcomes should be MECE. Listed Outcomes should have a natural flow (if applicable). 
+1.2. Executive Questions 
+2. KPI's that drive actions for each outcome. KPIs should emphasize **change (Delta)** rather than absolute values. Ex: QoQ, YoY, but expand your tree of thought and use what makes sense.
+2.1 Operational metrics(drivers) answer "Why did the KPI move?" {2 - 5 metrics for each KPI}
+2.2 Analytical lenses answer "Why does this business behave this way?" {Optional}
+```

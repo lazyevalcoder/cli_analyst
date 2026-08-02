@@ -169,7 +169,7 @@ function badgeLbl(type) {
 
 const VIEW_LABELS = {
   analysis_turns: 'Analysis', structural_kg: 'Structural KG', diagnostic_kg: 'Diagnostic KG',
-  schema: 'Schema', priorities: 'Priorities', briefing: 'Briefing',
+  schema: 'Schema', priorities: 'Priorities', priority_values: 'Priority Values', briefing: 'Briefing',
   metric_catalog: 'Metric Catalog', knowledge_graph: 'Unified KG',
   reasoning_framework: 'Reasoning Framework', custom_instructions: 'Instructions',
   project_meta: 'Project Meta',
@@ -301,6 +301,7 @@ function renderFile(data) {
 function renderView(vt, content) {
   switch (vt) {
     case 'priorities': return viewPriorities(content);
+    case 'priority_values': return viewPriorityValues(content);
     case 'schema': return viewSchema(content);
     case 'structural_kg': return viewStructuralKG(content);
     case 'diagnostic_kg': return viewDiagnosticKG(content);
@@ -324,23 +325,44 @@ function viewPriorities(list) {
     h += `<div class="priority-card">`;
     h += `<h3>${i + 1}. ${esc(pri.name)}</h3>`;
     h += `<div class="md-body" style="font-size:13px;color:#555;">${pri.description_html || esc(pri.description || '')}</div>`;
-    if (pri.focus_areas) h += `<p style="color:#888;font-size:12px;margin-top:4px;">Focus: ${esc(pri.focus_areas)}</p>`;
     const eqs = pri.executive_questions || [];
-    eqs.forEach((eq, j) => {
-      h += `<div class="eq"><h4>E${j + 1}: ${esc(eq.question)}</h4>`;
-      (eq.kpis || []).forEach(k => {
+    const kpis = pri.kpis || [];
+    if (kpis.length && eqs.length && typeof eqs[0] === 'string') {
+      h += `<div class="eq"><h4>Executive questions</h4>`;
+      eqs.forEach(q => { h += `<div style="font-size:13px;color:#555;margin:2px 0;">• ${esc(q)}</div>`; });
+      h += `</div>`;
+    }
+    if (kpis.length) {
+      kpis.forEach(k => {
         h += `<div class="metric-row"><span class="badge badge-kpi">KPI</span> <strong>${esc(k.name)}</strong> <span class="mono">(${esc(k.metric)})</span>`;
         if (k.measurement) h += `<br><span style="color:#555;font-size:12px;margin-left:40px;">${esc(k.measurement)}</span>`;
+        if (k.analytical_lenses && k.analytical_lenses.length) {
+          h += `<br><span style="color:#777;font-size:12px;margin-left:40px;">Lenses: ${esc(k.analytical_lenses.join(', '))}</span>`;
+        }
+        (k.operational_metrics || []).forEach(s => {
+          h += `<div class="metric-row"><span class="badge badge-sm">Op</span> <strong>${esc(s.name)}</strong> <span class="mono">(${esc(s.metric)})</span>`;
+          if (s.measurement) h += `<br><span style="color:#555;font-size:12px;margin-left:40px;">${esc(s.measurement)}</span>`;
+          h += `</div>`;
+        });
         h += `</div>`;
       });
-      (eq.supporting_metrics || []).forEach(s => {
-        h += `<div class="metric-row"><span class="badge badge-sm">S</span> <strong>${esc(s.name)}</strong> <span class="mono">(${esc(s.metric)})</span>`;
-        if (s.measurement) h += `<br><span style="color:#555;font-size:12px;margin-left:40px;">${esc(s.measurement)}</span>`;
-        if (s.influences && s.influences.length) h += `<br><span style="color:#777;font-size:12px;margin-left:40px;">Influences: ${esc(s.influences.join(', '))}</span>`;
+    } else if (eqs.length && typeof eqs[0] === 'object') {
+      eqs.forEach((eq, j) => {
+        h += `<div class="eq"><h4>E${j + 1}: ${esc(eq.question)}</h4>`;
+        (eq.kpis || []).forEach(k => {
+          h += `<div class="metric-row"><span class="badge badge-kpi">KPI</span> <strong>${esc(k.name)}</strong> <span class="mono">(${esc(k.metric)})</span>`;
+          if (k.measurement) h += `<br><span style="color:#555;font-size:12px;margin-left:40px;">${esc(k.measurement)}</span>`;
+          h += `</div>`;
+        });
+        (eq.supporting_metrics || []).forEach(s => {
+          h += `<div class="metric-row"><span class="badge badge-sm">S</span> <strong>${esc(s.name)}</strong> <span class="mono">(${esc(s.metric)})</span>`;
+          if (s.measurement) h += `<br><span style="color:#555;font-size:12px;margin-left:40px;">${esc(s.measurement)}</span>`;
+          if (s.influences && s.influences.length) h += `<br><span style="color:#777;font-size:12px;margin-left:40px;">Influences: ${esc(s.influences.join(', '))}</span>`;
+          h += `</div>`;
+        });
         h += `</div>`;
       });
-      h += `</div>`;
-    });
+    }
     if (pri.analysis_summary_html) {
       h += `<details style="margin-top:8px;"><summary style="cursor:pointer;font-size:13px;font-weight:600;color:#1565c0;">Analysis Summary</summary>`;
       h += `<div class="md-body" style="margin-top:8px;padding:8px 0;">${pri.analysis_summary_html}</div></details>`;
@@ -429,15 +451,81 @@ function viewDiagnosticKG(dkg) {
 
 function viewMetricCatalog(kg) {
   const nodes = kg.nodes || [];
-  const entries = nodes.filter(n => n.type === 'kpi' || n.type === 'supporting_metric');
+  const entries = nodes.filter(n => n.type === 'kpi' || n.type === 'operational_metric' || n.type === 'supporting_metric');
   if (!entries.length) return '<div class="section">Metric catalog is empty.</div>';
-  let h = `<div class="section"><h2>Metric Catalog (${entries.length})</h2><table><tr><th>Name</th><th>Type</th><th>Priority</th><th>Q</th><th>Column</th><th>Formula</th></tr>`;
+  let h = `<div class="section"><h2>Metric Catalog (${entries.length})</h2><table><tr><th>Name</th><th>Type</th><th>Priority</th><th>Column</th><th>Formula</th></tr>`;
   entries.forEach(e => {
-    const t = e.type === 'kpi' ? '<span class="badge badge-kpi">KPI</span>' : '<span class="badge badge-sm">S</span>';
-    h += `<tr><td><strong>${esc(e.name)}</strong></td><td>${t}</td><td>${esc(e.priority || '')}</td><td class="mono">${esc((e.executive_question || '').slice(0, 50))}</td><td class="mono">${esc(e.metric || '')}</td><td class="mono" style="font-size:11px;">${esc((e.measurement || '').slice(0, 80))}</td></tr>`;
+    const isOp = e.type === 'operational_metric' || e.type === 'supporting_metric';
+    const t = e.type === 'kpi' ? '<span class="badge badge-kpi">KPI</span>' : '<span class="badge badge-sm">Op</span>';
+    const q = e.executive_question ? `<br><span style="color:#999;font-size:11px;">${esc(e.executive_question.slice(0, 50))}</span>` : '';
+    h += `<tr><td><strong>${esc(e.name)}</strong>${isOp ? '' : q}</td><td>${t}</td><td>${esc(e.priority || '')}</td><td class="mono">${esc(e.metric || '')}</td><td class="mono" style="font-size:11px;">${esc((e.measurement || '').slice(0, 80))}</td></tr>`;
   });
   h += `</table></div>`;
   return h;
+}
+
+// ---- View: Priority Values (Computed / Not Computed) ----
+
+function viewPriorityValues(data) {
+  const prios = data.priorities || {};
+  const names = Object.keys(prios);
+  if (!names.length) return '<div class="section">No computed priority values.</div>';
+  let h = `<div class="section"><h2>Computed Metric Values</h2>`;
+  if (data.period_definition) h += `<p style="color:#666;font-size:13px;">Period: ${esc(data.period_definition)}</p>`;
+  names.forEach(pname => {
+    const rec = prios[pname] || {};
+    const values = rec.values || {};
+    const vnames = Object.keys(values);
+    h += `<h3 style="margin-top:16px;">${esc(pname)}</h3>`;
+    if (!vnames.length) { h += `<p style="color:#888;font-size:13px;">No values.</p>`; return; }
+    h += `<table><tr><th>Metric</th><th>Status</th><th>Value</th><th>Basis</th><th>Notes</th></tr>`;
+    vnames.forEach(mname => {
+      const v = values[mname] || {};
+      const status = v.status || '';
+      if (status === 'not_computable' || status === 'error') {
+        const reason = v.reason_display || v.reason || 'Not computed.';
+        h += `<tr><td><strong>${esc(mname)}</strong></td><td><span class="badge badge-sm" style="background:#e0e0e0;color:#555;">Not computed</span></td><td style="color:#999;">—</td><td></td><td style="color:#666;font-size:12px;">${esc(reason)}</td></tr>`;
+      } else {
+        const val = v.value === null || v.value === undefined ? '—' : esc(String(v.value));
+        h += `<tr><td><strong>${esc(mname)}</strong></td><td><span class="badge badge-kpi">Computed</span></td><td class="mono">${val}</td><td class="mono" style="font-size:11px;">${esc(v.basis || '')}</td><td style="color:#999;font-size:12px;">${v.verified ? 'verified' : 'unverified'}</td></tr>`;
+      }
+    });
+    h += `</table>`;
+    const bdims = rec.breakdown_dimensions || [];
+    bdims.forEach(bdim => {
+      const col = bdim.column;
+      const bt = (rec.breakdowns || {})[col] || {};
+      const members = bdim.members || [];
+      if (!Object.keys(bt).length) return;
+      h += `<h3 style="margin-top:14px;">Breakdown by ${esc(col)}</h3>`;
+      h += `<table><tr><th>Metric</th>${members.map(m => `<th>${esc(m)}</th>`).join('')}</tr>`;
+      Object.keys(bt).forEach(mname => {
+        const cells = bt[mname] || [];
+        const byMember = {};
+        cells.forEach(c => byMember[c.member] = c);
+        h += `<tr><td><strong>${esc(mname)}</strong></td>`;
+        members.forEach(m => {
+          const c = byMember[m];
+          if (!c || c.status !== 'computed' || c.delta === null || c.delta === undefined) {
+            h += `<td style="color:#999;">—</td>`;
+          } else {
+            const unitSuffix = c.unit === 'percent' ? '%' : '';
+            h += `<td class="mono">${fmtNum(c.delta)}${esc(unitSuffix)}</td>`;
+          }
+        });
+        h += `</tr>`;
+      });
+      h += `</table>`;
+    });
+  });
+  h += `</div>`;
+  return h;
+}
+
+function fmtNum(n) {
+  if (n === null || n === undefined || Number.isNaN(n)) return '—';
+  if (Math.abs(n) >= 1000 || Math.abs(n) < 0.001) return n.toExponential(2);
+  return (Math.round(n * 1000) / 1000).toString();
 }
 
 // ---- View: Unified Knowledge Graph ----
