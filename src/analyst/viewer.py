@@ -9,7 +9,10 @@ from urllib.parse import parse_qs, urlparse
 import markdown  # type: ignore[import-untyped]
 import pandas as pd
 
+from src.analyst.scorecard import build_scorecard_payload
+
 HTML_PATH = Path(__file__).parent / "viewer.html"
+SCORECARD_HTML_PATH = Path(__file__).parent / "scorecard.html"
 MAX_CSV_ROWS = 1000
 
 
@@ -114,6 +117,7 @@ def _preprocess_markdown(data: "dict[Any, Any] | Sequence[Any]", view_type: str)
 
 class _Handler(BaseHTTPRequestHandler):
     projects_base: Path | None = None
+    default_project: str | None = None
 
     def _json_response(self, data, status: int = 200):
         self.send_response(status)
@@ -122,15 +126,17 @@ class _Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(json.dumps(data, indent=2, default=str).encode("utf-8"))
 
-    def _html_response(self):
-        self.send_response(200)
+    def _html_response(self, content: str, status: int = 200):
+        self.send_response(status)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.end_headers()
-        if HTML_PATH.exists():
-            html = HTML_PATH.read_text(encoding="utf-8")
-            self.wfile.write(html.encode("utf-8"))
+        self.wfile.write(content.encode("utf-8"))
+
+    def _html_file_response(self, path: Path):
+        if path.exists():
+            self._html_response(path.read_text(encoding="utf-8"))
         else:
-            self.wfile.write(b"<h1>viewer.html not found</h1>")
+            self._html_response("<h1>scorecard.html not found</h1>", 404)
 
     def _safe_path(self, rel_path: str) -> Path | None:
         norm = rel_path.replace("\\", "/").lstrip("/")
@@ -144,6 +150,42 @@ class _Handler(BaseHTTPRequestHandler):
         if not requested.exists():
             return None
         return requested
+
+    def _project_dir(self, project_name: str) -> Path | None:
+        """Resolve a project folder name safely beneath projects_base."""
+        assert self.projects_base is not None, "projects_base must be set before serving"
+        requested = (self.projects_base / project_name).resolve()
+        base_resolved = self.projects_base.resolve()
+        try:
+            requested.relative_to(base_resolved)
+        except ValueError:
+            return None
+        if not requested.is_dir():
+            return None
+        return requested
+
+    def _project_scorecard(self, project_name: str) -> dict | None:
+        """Read a project's priority values + priorities and build the scorecard payload."""
+        pdir = self._project_dir(project_name)
+        if pdir is None:
+            return None
+        pv_path = pdir / "metadata" / "priority_values.json"
+        pri_path = pdir / "metadata" / "priorities.json"
+        if not pv_path.exists():
+            return None
+        try:
+            priority_values = json.loads(pv_path.read_text(encoding="utf-8"))
+        except Exception:
+            return None
+        priorities: list = []
+        if pri_path.exists():
+            try:
+                raw = json.loads(pri_path.read_text(encoding="utf-8"))
+                if isinstance(raw, list):
+                    priorities = raw
+            except Exception:
+                priorities = []
+        return build_scorecard_payload(project_name, priority_values, priorities)
 
     def _handle_file_content(self, requested: Path, rel_path: str) -> dict:
         ext = requested.suffix.lower()
@@ -217,12 +259,33 @@ class _Handler(BaseHTTPRequestHandler):
         qs = parse_qs(parsed.query)
 
         if path == "/" or path == "/index.html":
-            self._html_response()
+            self._html_file_response(HTML_PATH)
 
         elif path == "/api/tree":
             assert self.projects_base is not None
             tree = _build_projects_tree(self.projects_base)
             self._json_response({"projects": tree})
+
+        elif path == "/scorecard":
+            self._html_file_response(SCORECARD_HTML_PATH)
+
+        elif path == "/api/scorecard":
+            rel = qs.get("project", [None])[0]
+            if not rel:
+                rel = self.default_project
+            if not rel:
+                self._json_response({"error": "Missing project parameter"}, 400)
+                return
+            payload = self._project_scorecard(rel)
+            if payload is None:
+                self._json_response({"error": "No computed values for project: " + rel}, 404)
+                return
+            self._json_response(payload)
+
+        elif path == "/api/projects":
+            assert self.projects_base is not None
+            names = sorted(d.name for d in self.projects_base.iterdir() if d.is_dir() and not d.name.startswith("."))
+            self._json_response({"projects": names})
 
         elif path == "/api/file":
             rel = qs.get("path", [None])[0]
@@ -245,8 +308,9 @@ class _Handler(BaseHTTPRequestHandler):
         pass
 
 
-def start_background(projects_base, port: int = 8081) -> HTTPServer:
+def start_background(projects_base, port: int = 8081, project_name: str | None = None) -> HTTPServer:
     _Handler.projects_base = Path(projects_base)
+    _Handler.default_project = project_name
     HTTPServer.allow_reuse_address = True
     server = HTTPServer(("127.0.0.1", port), _Handler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)

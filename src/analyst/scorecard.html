@@ -1,0 +1,191 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Scorecard</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: 'Segoe UI', system-ui, sans-serif; background: #f4f5f7; color: #222; }
+.header { background: #fff; border-bottom: 1px solid #e2e4e8; padding: 18px 28px; }
+.header h1 { font-size: 20px; color: #1a1a2e; }
+.header .sub { color: #6b7280; font-size: 13px; margin-top: 4px; }
+.header .meta { display: flex; flex-wrap: wrap; gap: 16px; align-items: center; margin-top: 12px; font-size: 13px; color: #4a5568; }
+.header select { padding: 6px 10px; border: 1px solid #ccd0d5; border-radius: 6px; font-size: 13px; background: #fff; }
+.main { padding: 20px 24px; max-width: 1280px; }
+section.section { background: #fff; border: 1px solid #e2e4e8; border-radius: 10px; margin-bottom: 20px; overflow: hidden; }
+.section-header { padding: 14px 18px; border-bottom: 1px solid #eceef1; background: #fafbfc; }
+.section-header h2 { font-size: 15px; color: #1a1a2e; }
+.section-header .dimension { font-size: 12px; color: #6b7280; margin-top: 2px; }
+.table-wrap { overflow-x: auto; }
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+th, td { text-align: right; padding: 8px 14px; border-bottom: 1px solid #f0f1f3; white-space: nowrap; }
+th { background: #f7f8fa; font-weight: 600; color: #4a5568; font-size: 12px; }
+th:first-child, td:first-child { text-align: left; }
+td.metric { font-variant-numeric: tabular-nums; }
+td.metric .name { font-weight: 500; }
+td.metric .basis { font-size: 11px; color: #a0a6ad; font-weight: 400; }
+tr.op td:first-child { padding-left: 30px; }
+tr.op td.metric .name { color: #555; font-weight: 400; }
+td { color: #333; }
+td .value.up { color: #107a3e; }
+td .value.neg { color: #c0392b; }
+td .value.neutral { color: #6b7280; }
+td .empty { color: #b0b6bd; }
+.legend { font-size: 12px; color: #6b7280; padding: 10px 18px; border-top: 1px solid #f0f1f3; background: #fafbfc; }
+.load, .error { padding: 40px; text-align: center; color: #6b7280; }
+.error { color: #c62828; }
+.muted { color: #6b7280; font-size: 12px; }
+</style>
+</head>
+<body>
+<div class="header">
+  <h1>Scorecard</h1>
+  <div class="meta">
+    <select id="project-select" title="Project"></select>
+    <span id="period-def"></span>
+    <span id="generated-at"></span>
+    <span id="engine-ver"></span>
+  </div>
+</div>
+<div class="load" id="loading">Loading…</div>
+<div class="error" id="error" style="display:none;"></div>
+<div class="main" id="main"></div>
+
+<script>
+const select = document.getElementById('project-select');
+
+function esc(s) {
+  return String(s == null ? '' : s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+async function fetchJSON(url) {
+  const resp = await fetch(url);
+  if (!resp.ok) {
+    const body = await resp.text();
+    let msg = 'HTTP ' + resp.status;
+    try { msg = JSON.parse(body).error || msg; } catch (e) {}
+    throw new Error(msg);
+  }
+  return resp.json();
+}
+
+function fmtSig(n) {
+  if (n === null || n === undefined || Number.isNaN(n)) return '—';
+  if (Math.abs(n) >= 1000000) return (n / 1000000).toFixed(1) + 'M';
+  if (Math.abs(n) >= 1000) return (n / 1000).toFixed(1) + 'K';
+  if (Math.abs(n) < 0.01 && n !== 0) return n.toExponential(1);
+  return String(Math.round(n * 100) / 100);
+}
+
+function fmtCell(cell) {
+  if (!cell || cell.value === undefined || cell.value === null) return '<span class="empty">—</span>';
+  const isPct = cell.unit === 'percent' || cell.unit === 'ratio' || cell.unit === 'pp';
+  const n = isPct ? cell.value * 100 : cell.value;
+  let txt;
+  if (isPct) {
+    txt = (cell.value > 0 ? '+' : '') + fmtSig(n) + '%';
+  } else if (cell.unit === 'days') {
+    txt = fmtSig(n) + 'd';
+  } else {
+    txt = fmtSig(n);
+  }
+  const cls = cell.value < 0 ? 'neg' : (cell.value === 0 ? 'neutral' : 'up');
+  return '<span class="value ' + cls + '">' + txt + '</span>';
+}
+
+function cellTitle(cell) {
+  if (!cell) return '';
+  const parts = [];
+  if (cell.basis) parts.push(cell.basis);
+  if (cell.reason) parts.push(cell.reason);
+  return parts.join(' — ');
+}
+
+function render(data) {
+  document.getElementById('loading').style.display = 'none';
+  document.getElementById('period-def').textContent = data.period_definition ? 'Period: ' + data.period_definition : '';
+  document.getElementById('generated-at').textContent = data.generated_at ? 'Generated: ' + data.generated_at.replace('T', ' ').slice(0, 19) : '';
+  document.getElementById('engine-ver').textContent = data.engine_version ? 'v' + data.engine_version.replace('engine-', '') : '';
+
+  const main = document.getElementById('main');
+  let html = '';
+  data.sections.forEach((sec, i) => {
+    const members = sec.columns.slice(1).filter(Boolean);
+    html += '<section class="section">';
+    html += '<div class="section-header"><h2>' + (i + 1) + '. ' + esc(sec.priority) + '</h2>';
+    if (sec.dimension) html += '<div class="dimension">Breakdown by ' + esc(sec.dimension) + '</div>';
+    if (sec.description) html += '<div class="dimension" style="margin-top:4px;">' + esc(sec.description) + '</div>';
+    html += '</div><div class="table-wrap"><table><thead><tr><th>Metric</th><th>Overall</th>';
+    members.forEach(m => html += '<th>' + esc(m) + '</th>');
+    html += '</tr></thead><tbody>';
+    sec.rows.forEach(row => {
+      html += '<tr class="' + row.kind + '">';
+      html += '<td class="metric"><span class="name">' + esc(row.name) + '</span>';
+      if (row.overall && row.overall.basis) html += '<div class="basis">' + esc(row.overall.basis) + '</div>';
+      html += '</td>';
+      html += '<td title="' + esc(cellTitle(row.overall)) + '">' + fmtCell(row.overall) + '</td>';
+      members.forEach(m => {
+        const cell = row.cells ? row.cells[m] : null;
+        html += '<td title="' + esc(cellTitle(cell)) + '">' + fmtCell(cell) + '</td>';
+      });
+      html += '</tr>';
+    });
+    html += '</tbody></table></div>';
+    html += '<div class="legend">— = not computable for this member (no baseline / no data). Percent values are period-over-period change.</div>';
+    html += '</section>';
+  });
+  main.innerHTML = data.sections.length
+    ? html
+    : '<div class="loading">No computed priority values yet. Run <code>priorities compute &lt;n&gt;</code> then <code>priorities breakdown &lt;n&gt;</code> in the CLI.</div>';
+}
+
+async function load(project) {
+  const err = document.getElementById('error');
+  const loading = document.getElementById('loading');
+  loading.style.display = 'block';
+  err.style.display = 'none';
+  try {
+    const url = project ? '/api/scorecard?project=' + encodeURIComponent(project) : '/api/scorecard';
+    const data = await fetchJSON(url);
+    render(data);
+  } catch (e) {
+    loading.style.display = 'none';
+    err.textContent = 'Failed to load scorecard: ' + e.message;
+    err.style.display = 'block';
+    document.getElementById('main').innerHTML = '';
+  }
+}
+
+async function init() {
+  try {
+    const data = await fetchJSON('/api/projects');
+    const names = data.projects || [];
+    if (!names.length) {
+      select.innerHTML = '<option>—</option>';
+    } else {
+      names.forEach(n => {
+        const opt = document.createElement('option');
+        opt.value = n; opt.textContent = n;
+        select.appendChild(opt);
+      });
+      select.addEventListener('change', () => load(select.value));
+    }
+  } catch (e) {
+    select.innerHTML = '<option>—</option>';
+  }
+  // If a query param ?project= was given, honor it; otherwise use the server default.
+  const params = new URLSearchParams(window.location.search);
+  const wants = params.get('project');
+  if (wants && select) {
+    for (const opt of select.options) if (opt.value === wants) { opt.selected = true; break; }
+    load(wants);
+  } else {
+    load(select.value || undefined);
+  }
+}
+
+init();
+</script>
+</body>
+</html>

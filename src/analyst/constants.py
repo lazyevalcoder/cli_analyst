@@ -80,6 +80,17 @@ RESULT_PRIORITIES = "priorities"
 RESULT_PRIORITY_REF = "priority_ref"
 RESULT_PRIORITY_FINGERPRINT = "fingerprint"
 RESULT_VALUES = "values"
+RESULT_BREAKDOWN_DIMENSIONS = "breakdown_dimensions"
+RESULT_BREAKDOWNS = "breakdowns"
+
+# ---- dimension breakdown keys (persisted in priority_values.json `breakdowns`) ----
+BREAKDOWN_COLUMN = "column"
+BREAKDOWN_RATIONALE = "rationale"
+BREAKDOWN_MEMBERS = "members"
+BREAKDOWN_AT = "member"
+BREAKDOWN_CURRENT = "current"
+BREAKDOWN_PRIOR = "prior"
+BREAKDOWN_DELTA = "delta"
 
 # ---- priority / KPI / metric shape keys (LLM contract, persisted) ----
 PRIORITY_NAME = "name"

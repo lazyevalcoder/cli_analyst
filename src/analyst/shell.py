@@ -1702,8 +1702,9 @@ class AnalystShell(cmd.Cmd):
         if not self.project.root or not self.project.root.exists():
             return
         try:
-            self._viewer_server = viewer.start_background(self.project.root.parent)
+            self._viewer_server = viewer.start_background(self.project.root.parent, project_name=self.project.name)
             print("  Web viewer: http://localhost:8081")
+            print(f"  Scorecard: http://localhost:8081/scorecard (project: {self.project.name})")
         except Exception as e:
             print(f"  Web viewer: failed to start ({e})")
 
