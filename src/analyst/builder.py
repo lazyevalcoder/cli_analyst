@@ -1,17 +1,32 @@
 import ast
 import hashlib
 import json
+import logging
 import math
 import re
 import warnings
+from collections.abc import Callable
 from datetime import datetime
+from typing import cast
 
 import pandas as pd
 
-from src.analyst import llm
-from src.analyst import prompts
-from src.analyst import sandbox
-from src.analyst.graph import format_diagnostic_kg, format_structural_kg
+from src.analyst import llm, models, prompts, sandbox
+from src.analyst.constants import (
+    AGGS,
+    COMPARES,
+    COMPUTE_ENGINE_VERSION,
+    DERIVE_OPS,
+    INNER_AGGS,
+    OUTER_AGGS,
+    STATUS_COMPUTED,
+    STATUS_ERROR,
+    STATUS_NOT_COMPUTABLE,
+    SUB_AGGS,
+)
+from src.analyst.graph import format_diagnostic_kg, format_structural_kg, slugify
+
+logger = logging.getLogger(__name__)
 
 
 def load_csv(path: str) -> pd.DataFrame:
@@ -91,7 +106,7 @@ def _validate_diagnostic_kg(kg: dict) -> dict:
 
 
 def build_structural_kg(schema: str) -> dict:
-    prompt = prompts.format(prompts.load("structural_kg_prompt.md"), schema=schema)
+    prompt = prompts.render("structural_kg_prompt.md", schema=schema)
     raw = llm.ask_json(prompt, system_context="You are a data architect. Return only valid JSON.")
     validated = _validate_structural_kg(raw)
     if not validated["nodes"] and not validated["edges"]:
@@ -102,7 +117,7 @@ def build_structural_kg(schema: str) -> dict:
 
 
 def build_diagnostic_kg(structural_kg: dict) -> dict:
-    prompt = prompts.format(prompts.load("diagnostic_kg_prompt.md"), structural_kg=str(structural_kg))
+    prompt = prompts.render("diagnostic_kg_prompt.md", structural_kg=str(structural_kg))
     raw = llm.ask_json(prompt, system_context="You are a business analyst. Return only valid JSON.")
     validated = _validate_diagnostic_kg(raw)
     if not validated.get("chains") and not validated.get("hypotheses"):
@@ -121,8 +136,9 @@ def build_llm_context(structural_kg: dict, diagnostic_kg: dict) -> str:
     )
 
 
-def build_reasoning_context(schema: str, structural_kg: dict, diagnostic_kg: dict) -> str:
-    prompt = prompts.format(prompts.load("reasoning_context_prompt.md"),
+def build_reasoning_context(schema: str, structural_kg: dict, diagnostic_kg: dict) -> dict:
+    prompt = prompts.render(
+        "reasoning_context_prompt.md",
         schema=schema,
         structural_kg=str(structural_kg),
         diagnostic_kg=str(diagnostic_kg),
@@ -174,8 +190,8 @@ def identify_priorities(schema: str, structural_kg: dict, diagnostic_kg: dict) -
     Returns a dict with `domain`, `health_indicators`, and `priorities` (the new
     outcome → executive questions → KPIs → operational metrics → lenses model).
     """
-    prompt = prompts.format(
-        prompts.load("priorities_prompt.md"),
+    prompt = prompts.render(
+        "priorities_prompt.md",
         schema=schema,
         structural_kg=str(structural_kg),
         diagnostic_kg=str(diagnostic_kg),
@@ -191,19 +207,18 @@ def identify_priorities(schema: str, structural_kg: dict, diagnostic_kg: dict) -
     }
 
 
-def format_priority_metric_brief(pri: dict, diagnostic_kg: dict = None, values: dict = None) -> str:
+def format_priority_metric_brief(pri: dict, diagnostic_kg: dict | None = None, values: dict | None = None) -> str:
     """Render a priority's KPIs + operational metrics (with DKG drill-down dimensions) as a prompt brief.
 
     If `values` (the per-priority stored values dict) is supplied, appends a PRE-COMPUTED VALUES section.
     Supports both the new model and legacy shapes.
     """
-    from src.analyst.graph import _slugify
     eqs = pri.get("executive_questions", [])
     dims = diagnostic_kg.get("dimensions_affecting", {}) if isinstance(diagnostic_kg, dict) else {}
     dims_lower = {str(k).lower(): v for k, v in dims.items()}
 
     def drill_dims(metric_name: str, source_col: str) -> list:
-        for key in (str(metric_name).lower(), _slugify(metric_name), str(source_col).lower(), _slugify(source_col)):
+        for key in (str(metric_name).lower(), slugify(metric_name), str(source_col).lower(), slugify(source_col)):
             if key in dims_lower:
                 return dims_lower[key]
         return []
@@ -273,7 +288,7 @@ def format_priority_metric_brief(pri: dict, diagnostic_kg: dict = None, values: 
             period = rec.get("period", "")
             status = rec.get("status", "")
             verified = rec.get("verified", False)
-            if status == "not_computable":
+            if status == STATUS_NOT_COMPUTABLE:
                 reason = rec.get("reason_display") or friendly_reason(rec.get("reason", ""))
                 lines.append(f"  {mname}: NOT COMPUTED — {reason}")
                 continue
@@ -288,8 +303,8 @@ def format_priority_metric_brief(pri: dict, diagnostic_kg: dict = None, values: 
 
 
 def generate_briefing(schema: str, structural_kg: dict, diagnostic_kg: dict, priorities: list) -> dict:
-    prompt = prompts.format(
-        prompts.load("briefing_prompt.md"),
+    prompt = prompts.render(
+        "briefing_prompt.md",
         schema=schema,
         structural_kg=str(structural_kg),
         diagnostic_kg=str(diagnostic_kg),
@@ -309,48 +324,37 @@ def generate_briefing(schema: str, structural_kg: dict, diagnostic_kg: dict, pri
 def _iter_priority_metrics(pri: dict):
     """Yield (kind, metric) for every KPI and operational metric in a priority.
 
-    Supports the new model (KPIs with nested `operational_metrics`) and the legacy
-    shapes (flat `supporting_metrics` or nested `executive_questions`).
+    Delegates to the shared traversal in `models` so all three priority shapes are
+    handled in exactly one place.
     """
-    kpis = pri.get("kpis", [])
-    if kpis:
-        for k in kpis:
-            yield "KPI", k
-            for op in k.get("operational_metrics", []):
-                yield "OPERATIONAL", op
-        return
-    eqs = pri.get("executive_questions", [])
-    if eqs and isinstance(eqs[0], dict):
-        for eq in eqs:
-            for k in eq.get("kpis", []):
-                yield "KPI", k
-            for s in eq.get("supporting_metrics", []):
-                yield "OPERATIONAL", s
-        return
-    for k in pri.get("kpis", []):
-        yield "KPI", k
-    for s in pri.get("supporting_metrics", []):
-        yield "OPERATIONAL", s
+    yield from models.iter_priority_metrics(pri)
 
 
 def priority_fingerprint(pri: dict) -> str:
     """Definition fingerprint: sha256 over the sorted (name, measurement) pairs."""
-    pairs = sorted(
-        (str(k.get("name", "")), str(k.get("measurement", "")))
-        for _, k in _iter_priority_metrics(pri)
-    )
+    pairs = sorted((str(k.get("name", "")), str(k.get("measurement", ""))) for _, k in _iter_priority_metrics(pri))
     payload = json.dumps(pairs, ensure_ascii=False)
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 _DATE_NAME_HINTS = (
-    "date", "time", "month", "quarter", "year", "day", "period",
-    "created", "updated", "modified", "timestamp", "dt",
+    "date",
+    "time",
+    "month",
+    "quarter",
+    "year",
+    "day",
+    "period",
+    "created",
+    "updated",
+    "modified",
+    "timestamp",
+    "dt",
 )
 _DATE_SAMPLE_PATTERNS = (
-    re.compile(r"\d{4}[-/.]\d{1,2}[-/.]\d{1,2}"),    # ISO / YYYY-MM-DD
+    re.compile(r"\d{4}[-/.]\d{1,2}[-/.]\d{1,2}"),  # ISO / YYYY-MM-DD
     re.compile(r"\d{1,2}[-/.]\d{1,2}[-/.]\d{2,4}"),  # US-style MM/DD/YYYY
-    re.compile(r"\d{4}[-/.]\d{1,2}$"),               # YYYY-MM
+    re.compile(r"\d{4}[-/.]\d{1,2}$"),  # YYYY-MM
 )
 
 
@@ -376,7 +380,8 @@ def _detect_date_columns(df: pd.DataFrame) -> list[str]:
                     s = pd.to_datetime(df[c], errors="coerce")
                 if s.notna().mean() > 0.8 and (s.max() - s.min()).days > 0:
                     cols.append(c)
-            except Exception:
+            except Exception as e:
+                logger.debug("date-coerce failed for column %r: %s", c, e)
                 continue
     return cols
 
@@ -390,7 +395,8 @@ def data_fingerprint(df: pd.DataFrame) -> str:
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore")
                 max_date = str(pd.to_datetime(df[cols[0]], errors="coerce").max())
-        except Exception:
+        except Exception as e:
+            logger.debug("could not fingerprint latest date: %s", e)
             max_date = None
     payload = f"{df.shape}|{max_date}"
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
@@ -425,7 +431,7 @@ def _period_for(d, unit: str):
     return d, d
 
 
-def _period_bounds(unit: str, max_date) -> dict | None:
+def _period_bounds(unit: str | None, max_date) -> dict | None:
     """Deterministic most-recent-complete-period bounds.
 
     Returns {"current_start", "current_end", "prior_start", "prior_end"} as ISO
@@ -434,7 +440,6 @@ def _period_bounds(unit: str, max_date) -> dict | None:
     """
     if not max_date or pd.isna(max_date):
         return None
-    from datetime import date as _date
     from datetime import timedelta as _timedelta
 
     d = pd.Timestamp(max_date).date()
@@ -479,13 +484,12 @@ def resolve_period(df: pd.DataFrame, schema_str: str) -> dict:
             s = pd.to_datetime(df[c], errors="coerce").dropna()
         if len(s):
             samples[c] = {"min": str(s.min()), "max": str(s.max())}
-    prompt = prompts.format(
-        prompts.load("priority_period_prompt.md"),
+    prompt = prompts.render(
+        "priority_period_prompt.md",
         schema=schema_str,
         date_candidates=str(samples),
     )
-    raw = llm.ask_json(prompt, system_context="You are a data analyst. Return only valid JSON.",
-                       label="Resolving time period")
+    raw = llm.ask_json(prompt, system_context="You are a data analyst. Return only valid JSON.", label="Resolving time period")
     if not isinstance(raw, dict):
         raw = {}
     date_col = raw.get("date_column")
@@ -529,11 +533,12 @@ def resolve_period(df: pd.DataFrame, schema_str: str) -> dict:
 
 def _valid_bounds(bounds: dict) -> bool:
     from datetime import datetime as _dt
+
     vals = [bounds.get(k) for k in ("current_start", "current_end", "prior_start", "prior_end")]
     if any(v is None for v in vals):
         return False
     try:
-        cs, ce, ps, pe = (_dt.fromisoformat(v) for v in vals)
+        cs, ce, ps, pe = (_dt.fromisoformat(cast(str, v)) for v in vals)
     except (ValueError, TypeError):
         return False
     return cs <= ce and ps <= pe and pe < cs
@@ -555,17 +560,7 @@ def _parse_compute_output(output: str) -> dict:
     return data
 
 
-_AGGS = {"count", "sum", "mean", "median", "std", "ratio", "share", "topk_share", "count_distinct"}
-_COMPARES = {"level", "pct_change", "pp_change", "rate_ratio"}
 _BLOCKED_IN_CONDITION = ("import", "__", "open(", "exec(", "eval(", "compile(", "os.", "sys.")
-
-# Operator DSL (metric-spec-v2-composable-operator-dsl.md)
-_INNER_AGGS = {"count", "sum", "mean", "median", "std", "min", "max", "share"}
-_OUTER_AGGS = {"mean", "median", "std", "max", "min", "sum"}
-_DERIVE_OPS = {"derive.days_between", "derive.year_of", "derive.month_of", "derive.arithmetic"}
-
-# Bump when the compute engine changes behavior so stored values are forced to recompute.
-COMPUTE_ENGINE_VERSION = "engine-v3-2026-08-02-breakdowns"
 
 # Residual pre-filter: only DATA-LIMITED measurements are hard-filtered now. Per-group /
 # by / top-% / distinct / new measurements are expressible via the operator DSL and flow
@@ -580,6 +575,7 @@ _DATA_LIMITED_PATTERNS = (
     re.compile(r"\b(days?|time)\s+(?:spent\s+)?(?:in|per|within)\s+stage\b", re.I),
 )
 _DATA_LIMITED_PRIMITIVE = "requires stage-entry/transition timestamps"
+
 
 def _non_scalar_reason(measurement: str) -> tuple[str, str]:
     """Classifier for measurements the operator DSL cannot express.
@@ -596,7 +592,7 @@ def _non_scalar_reason(measurement: str) -> tuple[str, str]:
             return (
                 f"measurement requires per-row stage-entry/transition timestamps that "
                 f"the current data grain does not provide "
-                f"(matched \"{m.group(0).strip()}\")",
+                f'(matched "{m.group(0).strip()}")',
                 _DATA_LIMITED_PRIMITIVE,
             )
     return "", ""
@@ -609,33 +605,43 @@ def _non_scalar_reason(measurement: str) -> tuple[str, str]:
 # ---------------------------------------------------------------------------
 
 _FRIENDLY_REASON_MAP = [
-    (re.compile(r"no prior-period baseline \(prior value is 0\)", re.I),
-     "There is no earlier period to compare against — the prior value is zero, so a "
-     "percentage change can't be computed."),
-    (re.compile(r"prior comparison period contains no data|prior period.*no data|no data.*prior period", re.I),
-     "The prior comparison period has no data, so a period-over-period change can't be computed."),
-    (re.compile(r"no time dimension|no time column|no prior period \(no time", re.I),
-     "The data has no time column, so period-over-period metrics can't be computed."),
-    (re.compile(r"metric omitted or not produced in output", re.I),
-     "This metric couldn't be expressed in a form the compute engine supports, so it was not computed."),
-    (re.compile(r"LLM could not express this measurement as a scalar spec", re.I),
-     "This metric couldn't be expressed in a form the compute engine supports, so it was not computed."),
-    (re.compile(r"no valid spec produced", re.I),
-     "No valid computation definition could be produced for this metric."),
-    (re.compile(r"template returned null", re.I),
-     "The metric's formula returned no value — for example, an empty prior period or a division by zero."),
-    (re.compile(r"division by zero|divide by zero|empty prior period", re.I),
-     "The calculation had nothing to divide by, so no value can be produced."),
-    (re.compile(r"requires per-row stage-entry/transition timestamps", re.I),
-     "This metric needs per-stage timing data (entry/transition timestamps) that this dataset doesn't contain."),
-    (re.compile(r"not in schema|unknown column|not a column", re.I),
-     "This metric references a column that isn't in the data."),
-    (re.compile(r"malformed value record", re.I),
-     "The computed result was malformed, so no value could be recorded."),
-    (re.compile(r"script failed", re.I),
-     "The computation hit an error and could not produce a value."),
-    (re.compile(r"no value produced", re.I),
-     "No value could be produced for this metric."),
+    (
+        re.compile(r"no prior-period baseline \(prior value is 0\)", re.I),
+        "There is no earlier period to compare against — the prior value is zero, so a percentage change can't be computed.",
+    ),
+    (
+        re.compile(r"prior comparison period contains no data|prior period.*no data|no data.*prior period", re.I),
+        "The prior comparison period has no data, so a period-over-period change can't be computed.",
+    ),
+    (
+        re.compile(r"no time dimension|no time column|no prior period \(no time", re.I),
+        "The data has no time column, so period-over-period metrics can't be computed.",
+    ),
+    (
+        re.compile(r"metric omitted or not produced in output", re.I),
+        "This metric couldn't be expressed in a form the compute engine supports, so it was not computed.",
+    ),
+    (
+        re.compile(r"LLM could not express this measurement as a scalar spec", re.I),
+        "This metric couldn't be expressed in a form the compute engine supports, so it was not computed.",
+    ),
+    (re.compile(r"no valid spec produced", re.I), "No valid computation definition could be produced for this metric."),
+    (
+        re.compile(r"template returned null", re.I),
+        "The metric's formula returned no value — for example, an empty prior period or a division by zero.",
+    ),
+    (
+        re.compile(r"division by zero|divide by zero|empty prior period", re.I),
+        "The calculation had nothing to divide by, so no value can be produced.",
+    ),
+    (
+        re.compile(r"requires per-row stage-entry/transition timestamps", re.I),
+        "This metric needs per-stage timing data (entry/transition timestamps) that this dataset doesn't contain.",
+    ),
+    (re.compile(r"not in schema|unknown column|not a column", re.I), "This metric references a column that isn't in the data."),
+    (re.compile(r"malformed value record", re.I), "The computed result was malformed, so no value could be recorded."),
+    (re.compile(r"script failed", re.I), "The computation hit an error and could not produce a value."),
+    (re.compile(r"no value produced", re.I), "No value could be produced for this metric."),
 ]
 
 
@@ -676,21 +682,25 @@ def _precheck_measurement(measurement: str, period: dict, df: pd.DataFrame = Non
     if not _is_delta_measurement(text):
         return "", ""
     if not period.get("date_column") or not period.get("prior_start"):
-        return ("the dataset has no time dimension to compare against — period-over-period "
-                "metrics cannot be computed", "no prior period (no time dimension)")
+        return (
+            "the dataset has no time dimension to compare against — period-over-period metrics cannot be computed",
+            "no prior period (no time dimension)",
+        )
     if df is not None and period.get("date_column") and period.get("prior_start") and period.get("prior_end"):
         col = period["date_column"]
         try:
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore")
                 s = pd.to_datetime(df[col], errors="coerce").dropna()
-            has_prior = bool(((s >= pd.Timestamp(period["prior_start"])) &
-                              (s <= pd.Timestamp(period["prior_end"]))).any())
-        except Exception:
+            has_prior = bool(((s >= pd.Timestamp(period["prior_start"])) & (s <= pd.Timestamp(period["prior_end"]))).any())
+        except Exception as e:
+            logger.debug("prior-period presence check failed, assuming present: %s", e)
             has_prior = True
         if not has_prior:
-            return ("the prior comparison period contains no data, so a period-over-period "
-                    "change cannot be computed", "empty prior period")
+            return (
+                "the prior comparison period contains no data, so a period-over-period change cannot be computed",
+                "empty prior period",
+            )
     return "", ""
 
 
@@ -722,7 +732,7 @@ def _check_expression(expr: str, columns: set) -> tuple[bool, str]:
         tree = ast.parse(expr, mode="eval")
     except SyntaxError:
         return False, f"derive.arithmetic expr does not compile: {expr[:60]}"
-    msg = sandbox._check_ast_safe(tree)
+    msg = sandbox.check_ast_safe(tree)
     if msg:
         return False, f"derive.arithmetic expr not safe: {msg}"
     for node in ast.walk(tree):
@@ -749,12 +759,12 @@ def _rewrite_expr(expr: str) -> str:
     return ast.unparse(tree)
 
 
-def _validate_spec(spec: dict, columns: set, batch_names: set = None) -> tuple[bool, str]:
+def _validate_spec(spec: dict, columns: set, batch_names: set | None = None) -> tuple[bool, str]:
     name = spec.get("name")
     if not name:
         return False, "spec missing name"
     compare = spec.get("compare")
-    if compare not in _COMPARES:
+    if compare not in COMPARES:
         return False, f"unknown compare '{compare}'"
 
     # ---- shared helpers ----
@@ -774,7 +784,7 @@ def _validate_spec(spec: dict, columns: set, batch_names: set = None) -> tuple[b
     def check_sub(sub, role):
         if not isinstance(sub, dict):
             return False, f"{role} is not an object"
-        if sub.get("agg") not in {"count", "sum", "mean", "count_distinct"}:
+        if sub.get("agg") not in SUB_AGGS:
             return False, f"{role} agg must be count|sum|mean|count_distinct, got {sub.get('agg')}"
         col = sub.get("value_column")
         if sub.get("agg") in ("sum", "mean", "count_distinct") and col not in columns:
@@ -782,7 +792,7 @@ def _validate_spec(spec: dict, columns: set, batch_names: set = None) -> tuple[b
         return check_cond(sub.get("condition"))
 
     # ---- prep (L2 derived columns, shared per EQ) ----
-    derived = set()
+    derived: set = set()
     prep = spec.get("prep") or []
     if prep:
         if not isinstance(prep, list):
@@ -791,7 +801,7 @@ def _validate_spec(spec: dict, columns: set, batch_names: set = None) -> tuple[b
             if not isinstance(op, dict):
                 return False, "prep op is not an object"
             opn = op.get("op")
-            if opn not in _DERIVE_OPS:
+            if opn not in DERIVE_OPS:
                 return False, f"unknown prep op '{opn}'"
             asname = op.get("as")
             if not asname or not isinstance(asname, str):
@@ -801,9 +811,9 @@ def _validate_spec(spec: dict, columns: set, batch_names: set = None) -> tuple[b
             if asname in derived:
                 return False, f"prep output '{asname}' declared twice"
             if opn == "derive.days_between":
-                for k in ("start", "end"):
-                    if op.get(k) not in columns:
-                        return False, f"prep {opn} {k} '{op.get(k)}' not in schema"
+                for key in ("start", "end"):
+                    if op.get(key) not in columns:
+                        return False, f"prep {opn} {key} '{op.get(key)}' not in schema"
             elif opn in ("derive.year_of", "derive.month_of"):
                 if op.get("column") not in columns:
                     return False, f"prep {opn} column '{op.get('column')}' not in schema"
@@ -833,9 +843,9 @@ def _validate_spec(spec: dict, columns: set, batch_names: set = None) -> tuple[b
             tree = ast.parse(code)
         except SyntaxError:
             return False, "custom code does not compile"
-        msg = sandbox._check_ast_safe(tree)
-        if msg:
-            return False, f"custom code not safe: {msg}"
+        unsafe = sandbox.check_ast_safe(tree)
+        if unsafe:
+            return False, f"custom code not safe: {unsafe}"
     elif steps is not None:
         if agg is not None:
             return False, "spec must use 'agg' OR 'steps', not both"
@@ -850,8 +860,8 @@ def _validate_spec(spec: dict, columns: set, batch_names: set = None) -> tuple[b
                 if gcol is not None and gcol not in columns and gcol not in derived:
                     return False, f"group step group_by '{gcol}' not in schema"
                 inner = step.get("inner_agg")
-                if inner not in _INNER_AGGS:
-                    return False, f"group step inner_agg must be one of {sorted(_INNER_AGGS)}, got {inner}"
+                if inner not in INNER_AGGS:
+                    return False, f"group step inner_agg must be one of {sorted(INNER_AGGS)}, got {inner}"
                 val = step.get("value")
                 if inner != "count" and val not in columns and val not in derived:
                     return False, f"group step value '{val}' not in schema"
@@ -859,8 +869,8 @@ def _validate_spec(spec: dict, columns: set, batch_names: set = None) -> tuple[b
                 if outer is None:
                     outer = "mean"
                     step["outer_agg"] = "mean"
-                if outer not in _OUTER_AGGS:
-                    return False, f"group step outer_agg must be one of {sorted(_OUTER_AGGS)}, got {outer}"
+                if outer not in OUTER_AGGS:
+                    return False, f"group step outer_agg must be one of {sorted(OUTER_AGGS)}, got {outer}"
             elif opn == "new":
                 if step.get("value_column") not in columns:
                     return False, f"new step value_column '{step.get('value_column')}' not in schema"
@@ -872,7 +882,7 @@ def _validate_spec(spec: dict, columns: set, batch_names: set = None) -> tuple[b
         else:
             return False, "spec must use 'agg' or 'steps' (or kind='custom')"
     else:
-        if agg not in _AGGS:
+        if agg not in AGGS:
             return False, f"unknown agg '{agg}'"
         if agg in ("sum", "mean", "median", "std", "topk_share", "count_distinct"):
             col = spec.get("value_column")
@@ -955,7 +965,9 @@ def _final_value(compare: str, cur_var: str, pri_var: str, out_var: str) -> list
     if compare == "level":
         lines.append(f"    {out_var} = {cur_var}")
     elif compare == "pct_change":
-        lines.append(f"    {out_var} = (({cur_var} - {pri_var}) / {pri_var}) if ({pri_var} is not None and {pri_var} != 0) else None")
+        lines.append(
+            f"    {out_var} = (({cur_var} - {pri_var}) / {pri_var}) if ({pri_var} is not None and {pri_var} != 0) else None"
+        )
     elif compare == "pp_change":
         lines.append(f"    {out_var} = ({cur_var} - {pri_var}) if ({cur_var} is not None and {pri_var} is not None) else None")
     elif compare == "rate_ratio":
@@ -1030,16 +1042,16 @@ def _emit_period_value(lines: list[str], mask_var: str, spec: dict, period: dict
 
     agg = spec.get("agg")
     if agg in ("count", "sum", "mean", "median", "std", "count_distinct"):
-        lines += _sel_block(mask_var, {"agg": agg, "value_column": spec.get("value_column"),
-                                       "condition": spec.get("condition")}, out_var)
+        lines += _sel_block(
+            mask_var, {"agg": agg, "value_column": spec.get("value_column"), "condition": spec.get("condition")}, out_var
+        )
     elif agg in ("ratio", "share"):
         vcol = spec.get("value_column")
         if agg == "share" and vcol is None:
             num = spec.get("numerator") or {"agg": "count", "condition": spec.get("condition")}
             den = spec.get("denominator") or {"agg": "count", "condition": None}
         else:
-            num = spec.get("numerator") or {"agg": "sum", "value_column": vcol,
-                                            "condition": spec.get("condition")}
+            num = spec.get("numerator") or {"agg": "sum", "value_column": vcol, "condition": spec.get("condition")}
             den = spec.get("denominator")
             if den is None and agg == "share":
                 den = {"agg": "sum", "value_column": vcol, "condition": None}
@@ -1106,12 +1118,15 @@ def build_metric_script(specs: list[dict], period: dict) -> str:
     date_col = period.get("date_column")
     lines = ["_out = {}"]
     if date_col:
-        _c = lambda k: period.get(k)
+
+        def _get(key: str):
+            return period.get(key)
+
         lines.append("_DT = pd.to_datetime(df[_DT_COL], errors='coerce')")
         # swapped in below
-        lines = [l.replace("_DT_COL", repr(date_col)) for l in lines]
-        cur_lo, cur_hi = _c("current_start"), _c("current_end")
-        pri_lo, pri_hi = _c("prior_start"), _c("prior_end")
+        lines = [line.replace("_DT_COL", repr(date_col)) for line in lines]
+        cur_lo, cur_hi = _get("current_start"), _get("current_end")
+        pri_lo, pri_hi = _get("prior_start"), _get("prior_end")
         if cur_lo and cur_hi and pri_lo and pri_hi:
             lines.append(f"_CUR = (_DT >= pd.Timestamp({cur_lo!r})) & (_DT <= pd.Timestamp({cur_hi!r}))")
             lines.append(f"_PRI = (_DT >= pd.Timestamp({pri_lo!r})) & (_DT <= pd.Timestamp({pri_hi!r}))")
@@ -1129,7 +1144,7 @@ def build_metric_script(specs: list[dict], period: dict) -> str:
         if not name:
             continue
         compare = spec.get("compare", "level")
-        lines.append(f"\ntry:")
+        lines.append("\ntry:")
         _emit_period_value(lines, "_CUR", spec, period, "_c")
         if compare != "level":
             _emit_period_value(lines, "_PRI", spec, period, "_p")
@@ -1143,11 +1158,10 @@ def build_metric_script(specs: list[dict], period: dict) -> str:
             lines.append("        _vr = None")
         else:
             lines.append("    _vr = None")
-        basis_expr = (
-            'f"current {_c:.3g}"' if compare == "level"
-            else 'f"current {_c:.3g} vs prior {_p:.3g}"'
+        basis_expr = 'f"current {_c:.3g}"' if compare == "level" else 'f"current {_c:.3g} vs prior {_p:.3g}"'
+        lines.append(
+            f"    _out[{json.dumps(name)}] = {{'value': _v, 'unit': {json.dumps(str(spec.get('unit', '')))}, 'basis': {basis_expr}, 'null_reason': _vr}}"
         )
-        lines.append(f"    _out[{json.dumps(name)}] = {{'value': _v, 'unit': {json.dumps(str(spec.get('unit', '')))}, 'basis': {basis_expr}, 'null_reason': _vr}}")
         lines.append("except Exception:")
         lines.append("    pass")
 
@@ -1155,7 +1169,7 @@ def build_metric_script(specs: list[dict], period: dict) -> str:
     return "\n".join(lines)
 
 
-def _nc_record(period: dict, measurement: str, reason: str, missing_prim: str = None, spec=None, basis="", unit=""):
+def _nc_record(period: dict, measurement: str, reason: str, missing_prim: str | None = None, spec=None, basis="", unit=""):
     """Build a not_computable value record with both a technical `reason` and a
     plain-language `reason_display` (rule book: honest statuses, no jargon)."""
     rec = {
@@ -1167,12 +1181,28 @@ def _nc_record(period: dict, measurement: str, reason: str, missing_prim: str = 
         "measurement": measurement,
         "spec": spec,
         "verified": False,
-        "status": "not_computable",
+        "status": STATUS_NOT_COMPUTABLE,
         "reason": reason,
         "reason_display": friendly_reason(reason),
     }
     if missing_prim:
         rec["missing_primitive"] = missing_prim
+    return rec
+
+
+def _computed_record(period: dict, measurement: str, value, unit: str, basis: str, spec: dict) -> dict:
+    """Build a computed value record (the partner of `_nc_record`)."""
+    rec = {
+        "filters": [],
+        "value": value,
+        "unit": unit,
+        "basis": basis,
+        "period": period["current_period"],
+        "measurement": measurement,
+        "spec": spec,
+        "verified": False,
+        "status": STATUS_COMPUTED,
+    }
     return rec
 
 
@@ -1244,7 +1274,8 @@ def _cell_verified(sub, period: dict, spec: dict, delta, unit: str) -> bool:
             if expected is None:
                 return False
             return _close(expected, delta)
-    except Exception:
+    except Exception as e:
+        logger.debug("cell L1 re-derivation failed: %s", e)
         pass
     ok, _ = _check_value({"value": delta, "unit": unit, "spec": spec})
     return ok
@@ -1266,7 +1297,8 @@ def _breakdown_cell(sub, period: dict, spec: dict, mrec: dict) -> dict:
             cur = None
         if parsed.get("_pri_n") == 0:
             pri = None
-    except Exception:
+    except Exception as e:
+        logger.debug("breakdown cell compute failed for %r: %s", spec.get("name"), e)
         cur = pri = None
     delta = _apply_compare(compare, cur, pri)
     if cur is not None:
@@ -1280,11 +1312,26 @@ def _breakdown_cell(sub, period: dict, spec: dict, mrec: dict) -> dict:
             reason = "no rows for this member in the prior period"
         else:
             reason = "no prior-period baseline (prior value is 0)"
-        return {"current": cur, "prior": pri, "delta": None, "unit": unit, "basis": basis,
-                "status": "not_computable", "verified": False,
-                "reason": reason, "reason_display": friendly_reason(reason)}
-    return {"current": cur, "prior": pri, "delta": delta, "unit": unit, "basis": basis,
-            "status": "computed", "verified": _cell_verified(sub, period, spec, delta, unit)}
+        return {
+            "current": cur,
+            "prior": pri,
+            "delta": None,
+            "unit": unit,
+            "basis": basis,
+            "status": STATUS_NOT_COMPUTABLE,
+            "verified": False,
+            "reason": reason,
+            "reason_display": friendly_reason(reason),
+        }
+    return {
+        "current": cur,
+        "prior": pri,
+        "delta": delta,
+        "unit": unit,
+        "basis": basis,
+        "status": STATUS_COMPUTED,
+        "verified": _cell_verified(sub, period, spec, delta, unit),
+    }
 
 
 def _dimension_members(df, col: str) -> list[str]:
@@ -1292,8 +1339,7 @@ def _dimension_members(df, col: str) -> list[str]:
     return sorted(str(v) for v in df[col].dropna().astype(str).unique())
 
 
-def _categorical_dimension_candidates(df, period: dict, max_cardinality: int = 50,
-                                     min_coverage_rows: int = 1) -> list[dict]:
+def _categorical_dimension_candidates(df, period: dict, max_cardinality: int = 50, min_coverage_rows: int = 1) -> list[dict]:
     """Deterministic candidate dimension columns: text-typed, low-to-moderate
     cardinality, with rows in BOTH the current and prior windows. Sorted by data
     coverage (desc) then cardinality (asc) so the fallback pick is the most-backed."""
@@ -1306,7 +1352,8 @@ def _categorical_dimension_candidates(df, period: dict, max_cardinality: int = 5
                 cur_mask = (_dt >= pd.Timestamp(period["current_start"])) & (_dt <= pd.Timestamp(period["current_end"]))
             if period.get("prior_start") and period.get("prior_end"):
                 pri_mask = (_dt >= pd.Timestamp(period["prior_start"])) & (_dt <= pd.Timestamp(period["prior_end"]))
-        except Exception:
+        except Exception as e:
+            logger.debug("dimension-window mask build failed: %s", e)
             cur_mask = pri_mask = None
     candidates = []
     for col in df.columns:
@@ -1334,8 +1381,7 @@ def _categorical_dimension_candidates(df, period: dict, max_cardinality: int = 5
     return candidates
 
 
-def suggest_breakdown_dimensions(pri: dict, df: pd.DataFrame, schema_str: str,
-                                 period: dict) -> dict | None:
+def suggest_breakdown_dimensions(pri: dict, df: pd.DataFrame, schema_str: str, period: dict) -> dict | None:
     """One LLM call choosing ONE breakdown dimension for the priority, restricted to
     categorical schema columns with data in both windows. An invalid or absent LLM pick
     falls back to the top data-backed candidate — never a fabricated column."""
@@ -1344,11 +1390,10 @@ def suggest_breakdown_dimensions(pri: dict, df: pd.DataFrame, schema_str: str,
         return None
     cand_names = [c["column"] for c in candidates]
     cand_lines = "\n".join(f"  - {c['column']} ({c['unique']} distinct values)" for c in candidates)
-    metric_lines = "\n".join(
-        f"  - {k.get('name', '')}: {k.get('measurement', '')}" for _, k in _iter_priority_metrics(pri))
+    metric_lines = "\n".join(f"  - {k.get('name', '')}: {k.get('measurement', '')}" for _, k in _iter_priority_metrics(pri))
     eq = pri.get("executive_questions") or []
-    prompt = prompts.format(
-        prompts.load("dimension_suggestion_prompt.md"),
+    prompt = prompts.render(
+        "dimension_suggestion_prompt.md",
         priority_name=pri.get("name", ""),
         priority_description=pri.get("description", ""),
         executive_questions="\n".join(f"  - {q}" for q in eq),
@@ -1359,7 +1404,8 @@ def suggest_breakdown_dimensions(pri: dict, df: pd.DataFrame, schema_str: str,
     try:
         raw = llm.ask_json(prompt, system_context="You are a BI analyst. Return ONLY a JSON object.")
         pick = raw[0] if isinstance(raw, list) and raw else raw
-    except Exception:
+    except Exception as e:
+        logger.debug("breakdown-dimension LLM pick failed, using fallback: %s", e)
         pick = None
     if isinstance(pick, dict):
         col = str(pick.get("column", "")).strip()
@@ -1369,8 +1415,7 @@ def suggest_breakdown_dimensions(pri: dict, df: pd.DataFrame, schema_str: str,
     return {"column": fallback["column"], "rationale": "Auto-selected: highest data coverage across both periods."}
 
 
-def compute_priority_breakdowns(pri: dict, df: pd.DataFrame, values: dict,
-                                period: dict, dimension: dict) -> dict:
+def compute_priority_breakdowns(pri: dict, df: pd.DataFrame, values: dict, period: dict, dimension: dict) -> dict:
     """Per-member metric values for one dimension, reusing each computed metric's stored
     spec. Returns {dimension_column: {metric_name: [{member, current, prior, delta, unit,
     basis, status, verified}]}}."""
@@ -1382,7 +1427,7 @@ def compute_priority_breakdowns(pri: dict, df: pd.DataFrame, values: dict,
         members = _dimension_members(df, dcol)
     out: dict = {}
     for mname, rec in (values or {}).items():
-        if not isinstance(rec, dict) or rec.get("status") != "computed" or rec.get("value") is None:
+        if not isinstance(rec, dict) or rec.get("status") != STATUS_COMPUTED or rec.get("value") is None:
             continue
         spec = rec.get("spec")
         if not isinstance(spec, dict):
@@ -1399,8 +1444,9 @@ def compute_priority_breakdowns(pri: dict, df: pd.DataFrame, values: dict,
     return {dcol: out}
 
 
-def compute_priority_values(pri: dict, df: pd.DataFrame, schema_str: str,
-                            existing: dict = None, on_progress: callable = None) -> dict:
+def compute_priority_values(
+    pri: dict, df: pd.DataFrame, schema_str: str, existing: dict | None = None, on_progress: Callable[..., None] | None = None
+) -> dict:
     """Resolve every KPI + operational metric in `pri` to ONE scalar and persist the structure.
 
     Per metric group (a KPI and its operational metrics): one compact LLM spec call
@@ -1423,7 +1469,7 @@ def compute_priority_values(pri: dict, df: pd.DataFrame, schema_str: str,
 
     values: dict = {}
     for name, rec in (existing or {}).items():
-        if isinstance(rec, dict) and rec.get("status") in ("computed", "not_computable", "error"):
+        if isinstance(rec, dict) and rec.get("status") in (STATUS_COMPUTED, STATUS_NOT_COMPUTABLE, STATUS_ERROR):
             values[name] = dict(rec)
 
     reasons: dict = {}
@@ -1458,8 +1504,10 @@ def compute_priority_values(pri: dict, df: pd.DataFrame, schema_str: str,
 
     print(f"  Metrics: {len(metrics)} across {len(groups)} group(s).", flush=True)
     if prefiltered:
-        print(f"  Pre-filtered {len(prefiltered)} data-limited metric(s) (missing primitive): "
-              f"{', '.join(sorted(prefiltered))}", flush=True)
+        print(
+            f"  Pre-filtered {len(prefiltered)} data-limited metric(s) (missing primitive): {', '.join(sorted(prefiltered))}",
+            flush=True,
+        )
 
     generated_at = datetime.now().isoformat(timespec="seconds")
     data_fp = data_fingerprint(df)
@@ -1493,15 +1541,12 @@ def compute_priority_values(pri: dict, df: pd.DataFrame, schema_str: str,
         if not missing:
             continue
         base_metrics_json = json.dumps(
-            [
-                {"name": k.get("name", ""), "metric": k.get("metric", ""), "measurement": k.get("measurement", "")}
-                for k in group
-            ],
+            [{"name": k.get("name", ""), "metric": k.get("metric", ""), "measurement": k.get("measurement", "")} for k in group],
             ensure_ascii=False,
             indent=2,
         )
-        base_prompt = prompts.format(
-            prompts.load("priority_spec_prompt.md"),
+        base_prompt = prompts.render(
+            "priority_spec_prompt.md",
             schema=schema_str,
             period_definition=period["definition_text"],
             metrics=base_metrics_json,
@@ -1518,8 +1563,11 @@ def compute_priority_values(pri: dict, df: pd.DataFrame, schema_str: str,
                     "Re-emit specs ONLY for the metrics above (exact names), following the schema."
                 )
             print(f"  Group {gi}/{len(groups)} attempt {attempt}: generating specs for {len(missing)} metric(s)...", flush=True)
-            raw = llm.ask_json(prompt, system_context="You are a data analyst. Return ONLY a JSON array of specs.",
-                               label=f"Generating specs (Group {gi})")
+            raw = llm.ask_json(
+                prompt,
+                system_context="You are a data analyst. Return ONLY a JSON array of specs.",
+                label=f"Generating specs (Group {gi})",
+            )
             specs = _parse_specs(raw)
             returned_names = {str(s.get("name", "")) for s in specs}
 
@@ -1532,7 +1580,8 @@ def compute_priority_values(pri: dict, df: pd.DataFrame, schema_str: str,
                 else:
                     for m in omitted:
                         values[m] = _nc_record(
-                            period, measurements.get(m, ""),
+                            period,
+                            measurements.get(m, ""),
                             "LLM could not express this measurement as a scalar spec (omitted)",
                         )
                         missing.remove(m)
@@ -1554,7 +1603,9 @@ def compute_priority_values(pri: dict, df: pd.DataFrame, schema_str: str,
                     continue
                 for m in missing:
                     values[m] = _nc_record(
-                        period, measurements.get(m, ""), reasons.get(m, "no valid spec produced"),
+                        period,
+                        measurements.get(m, ""),
+                        reasons.get(m, "no valid spec produced"),
                     )
                 break
             code = build_metric_script(valid, period)
@@ -1579,7 +1630,8 @@ def compute_priority_values(pri: dict, df: pd.DataFrame, schema_str: str,
                 source = "custom" if is_custom else None
                 if isinstance(rec, dict) and rec.get("value") is None:
                     values[mname] = _nc_record(
-                        period, k.get("measurement", ""),
+                        period,
+                        k.get("measurement", ""),
                         rec.get("null_reason") or "template returned null (e.g. empty prior period / division by zero)",
                         spec=dict(spec_by_name.get(mname) or {}),
                         basis=str(rec.get("basis", "")),
@@ -1589,18 +1641,17 @@ def compute_priority_values(pri: dict, df: pd.DataFrame, schema_str: str,
                         values[mname]["source"] = source
                     missing.remove(mname)
                     reasons.pop(mname, None)
-                elif isinstance(rec, dict) and isinstance(rec.get("value"), (int, float)) and not isinstance(rec.get("value"), bool):
-                    values[mname] = {
-                        "filters": [],
-                        "value": rec["value"],
-                        "unit": str(rec.get("unit", "")),
-                        "basis": str(rec.get("basis", "")),
-                        "period": period["current_period"],
-                        "measurement": k.get("measurement", ""),
-                        "spec": dict(spec_by_name.get(mname) or {}),
-                        "verified": False,
-                        "status": "computed",
-                    }
+                elif (
+                    isinstance(rec, dict) and isinstance(rec.get("value"), (int, float)) and not isinstance(rec.get("value"), bool)
+                ):
+                    values[mname] = _computed_record(
+                        period,
+                        k.get("measurement", ""),
+                        rec["value"],
+                        str(rec.get("unit", "")),
+                        str(rec.get("basis", "")),
+                        dict(spec_by_name.get(mname) or {}),
+                    )
                     if source:
                         values[mname]["source"] = source
                     missing.remove(mname)
@@ -1621,13 +1672,18 @@ def compute_priority_values(pri: dict, df: pd.DataFrame, schema_str: str,
         reason = reasons.get(mname, "no value produced")
         values[mname] = _nc_record(period, k.get("measurement", ""), reason)
         if mname in errored:
-            values[mname]["status"] = "error"
+            values[mname]["status"] = STATUS_ERROR
 
-    computed = sum(1 for v in values.values() if v.get("status") == "computed")
+    computed = sum(1 for v in values.values() if v.get("status") == STATUS_COMPUTED)
     failed = len(values) - computed
     print(f"\n  Done: {computed} computed, {failed} not computable/errored.", flush=True)
-    missing_prims = sorted({str(v.get("missing_primitive")) for v in values.values()
-                            if v.get("status") == "not_computable" and v.get("missing_primitive")})
+    missing_prims = sorted(
+        {
+            str(v.get("missing_primitive"))
+            for v in values.values()
+            if v.get("status") == STATUS_NOT_COMPUTABLE and v.get("missing_primitive")
+        }
+    )
     if missing_prims:
         print(f"  New primitives suggested: {', '.join(missing_prims)}", flush=True)
 
@@ -1713,7 +1769,8 @@ def _period_masks(df: pd.DataFrame, period: dict) -> tuple:
     if date_col in df.columns:
         try:
             _dt = pd.to_datetime(df[date_col], errors="coerce")
-        except Exception:
+        except Exception as e:
+            logger.debug("period-mask date parse failed: %s", e)
             _dt = None
         if _dt is not None and period.get("current_start") and period.get("current_end"):
             cur = (_dt >= pd.Timestamp(period["current_start"])) & (_dt <= pd.Timestamp(period["current_end"]))
@@ -1747,8 +1804,7 @@ def _recompute_value(df: pd.DataFrame, period: dict, spec: dict):
             num = spec.get("numerator") or {"agg": "count", "condition": spec.get("condition")}
             den = spec.get("denominator") or {"agg": "count", "condition": None}
         else:
-            num = spec.get("numerator") or {"agg": "sum", "value_column": vcol,
-                                            "condition": spec.get("condition")}
+            num = spec.get("numerator") or {"agg": "sum", "value_column": vcol, "condition": spec.get("condition")}
             den = spec.get("denominator")
             if den is None and agg == "share":
                 den = {"agg": "sum", "value_column": vcol, "condition": None}
@@ -1760,15 +1816,7 @@ def _recompute_value(df: pd.DataFrame, period: dict, spec: dict):
             _pd = _aggregate(df, pri_mask, den)
             _p = (_pn / _pd) if (_pd is not None and _pd != 0) else None
 
-    if compare == "level":
-        return _c
-    if compare == "pct_change":
-        return ((_c - _p) / _p) if (_p is not None and _p != 0) else None
-    if compare == "pp_change":
-        return (_c - _p) if (_c is not None and _p is not None) else None
-    if compare == "rate_ratio":
-        return (_c / _p) if (_p is not None and _p != 0) else None
-    return None
+    return _apply_compare(compare, _c, _p)
 
 
 def _verify_layers(values: dict, df: pd.DataFrame, period: dict) -> tuple[dict, dict]:
@@ -1784,7 +1832,7 @@ def _verify_layers(values: dict, df: pd.DataFrame, period: dict) -> tuple[dict, 
     }
     now = datetime.now().isoformat(timespec="seconds")
     for name, rec in updated.items():
-        if not isinstance(rec, dict) or rec.get("status") != "computed" or rec.get("value") is None:
+        if not isinstance(rec, dict) or rec.get("status") != STATUS_COMPUTED or rec.get("value") is None:
             continue
         checks = list((rec.get("verification") or {}).get("checks") or [])
         l0_ok, l0_note = _check_value(rec)
@@ -1858,44 +1906,50 @@ def _spec_columns(spec: dict) -> list[str]:
     return cols
 
 
-def verify_priority_values(pri: dict, df: pd.DataFrame, values: dict, period: dict,
-                           schema_str: str) -> dict:
+def verify_priority_values(pri: dict, df: pd.DataFrame, values: dict, period: dict, schema_str: str) -> dict:
     """Layer 2: one LLM call asking whether each computed value matches the measurement
     and the sampled data. Flag-only — can only unset `verified` / annotate.
     """
     metrics = []
     touched = set()
     for name, rec in values.items():
-        if not isinstance(rec, dict) or rec.get("status") != "computed" or rec.get("value") is None:
+        if not isinstance(rec, dict) or rec.get("status") != STATUS_COMPUTED or rec.get("value") is None:
             continue
         spec = rec.get("spec") or {}
-        metrics.append({
-            "name": name,
-            "measurement": rec.get("measurement", ""),
-            "spec": spec,
-            "value": rec.get("value"),
-            "unit": rec.get("unit", ""),
-            "compare": spec.get("compare", "level"),
-        })
+        metrics.append(
+            {
+                "name": name,
+                "measurement": rec.get("measurement", ""),
+                "spec": spec,
+                "value": rec.get("value"),
+                "unit": rec.get("unit", ""),
+                "compare": spec.get("compare", "level"),
+            }
+        )
         for c in _spec_columns(spec):
             if c in df.columns:
                 touched.add(c)
     if not metrics:
         return values
     samples = {c: df[c].dropna().head(5).astype(str).tolist() for c in sorted(touched)}
-    payload = json.dumps({
-        "period_definition": period.get("definition_text", ""),
-        "samples": samples,
-        "metrics": metrics,
-    }, ensure_ascii=False, indent=2)
-    prompt = prompts.format(
-        prompts.load("verify_priority_prompt.md"),
+    payload = json.dumps(
+        {
+            "period_definition": period.get("definition_text", ""),
+            "samples": samples,
+            "metrics": metrics,
+        },
+        ensure_ascii=False,
+        indent=2,
+    )
+    prompt = prompts.render(
+        "verify_priority_prompt.md",
         schema=schema_str,
         period_definition=period.get("definition_text", ""),
         metrics=payload,
     )
-    raw = llm.ask_json(prompt, system_context="You are a data analyst. Return only valid JSON.",
-                       label="Verifying metric values (L2)")
+    raw = llm.ask_json(
+        prompt, system_context="You are a data analyst. Return only valid JSON.", label="Verifying metric values (L2)"
+    )
     if not isinstance(raw, dict):
         return values
     now = datetime.now().isoformat(timespec="seconds")
@@ -1918,10 +1972,10 @@ def verify_priority_values(pri: dict, df: pd.DataFrame, values: dict, period: di
     return updated
 
 
-def interpret_priority(pri: dict, values: dict, breakdowns: dict = None) -> str:
+def interpret_priority(pri: dict, values: dict, breakdowns: dict | None = None) -> str:
     """Quick tier: one LLM call narrating stored values (+ dimension breakdowns)."""
-    prompt = prompts.format(
-        prompts.load("interpret_priority_prompt.md"),
+    prompt = prompts.render(
+        "interpret_priority_prompt.md",
         priority_name=pri.get("name", ""),
         priority_description=pri.get("description", ""),
         values=json.dumps(values, ensure_ascii=False, indent=2),

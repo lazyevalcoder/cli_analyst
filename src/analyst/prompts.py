@@ -16,6 +16,11 @@ def format(template: str, **kwargs: str) -> str:
     return template
 
 
+def render(name: str, **kwargs: str) -> str:
+    """Load a prompt file and fill its `{placeholders}` in one call."""
+    return format(load(name), **kwargs)
+
+
 def load_reasoning_framework() -> str:
     path = PROMPTS_DIR / "reasoning_framework.md"
     if path.exists():

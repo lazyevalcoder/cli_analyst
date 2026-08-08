@@ -2,9 +2,7 @@ import json
 import re
 import time
 
-from src.analyst import llm
-from src.analyst import prompts
-from src.analyst import sandbox
+from src.analyst import llm, prompts, sandbox
 from src.analyst.config import CONFIG
 from src.analyst.graph import KnowledgeGraph, format_diagnostic_kg, format_structural_kg
 
@@ -18,20 +16,36 @@ def _format_custom_instructions(instructions: list[str]) -> str:
     return "\n".join(lines)
 
 
-def reason_and_plan(question: str, schema: str, structural_kg: dict, diagnostic_kg: dict, reasoning_framework: str, context: list[dict] = None, custom_instructions: list[str] = None, metric_brief: str = "") -> tuple:
+def reason_and_plan(
+    question: str,
+    schema: str,
+    structural_kg: dict,
+    diagnostic_kg: dict,
+    reasoning_framework: str,
+    context: list[dict] | None = None,
+    custom_instructions: list[str] | None = None,
+    metric_brief: str = "",
+) -> tuple:
     # Fast-path for follow-ups
     if context:
         clean_question = re.sub(r"[^a-z0-9 ]", "", question.lower()).strip()
         fast_keywords = [
-            "what about", "how about", "and what", "also what", "specifically",
-            "tell me more", "elaborate", "go deeper", "dig into",
+            "what about",
+            "how about",
+            "and what",
+            "also what",
+            "specifically",
+            "tell me more",
+            "elaborate",
+            "go deeper",
+            "dig into",
         ]
         is_drill_down = any(clean_question.startswith(kw) for kw in fast_keywords)
         is_short_simple = len(clean_question.split()) <= 8 and not clean_question.startswith("why")
         if is_drill_down or is_short_simple:
             last_turn = context[-1]
             reasoning = (
-                f"Fast follow-up on: \"{last_turn.get('question', '')}\"\n"
+                f'Fast follow-up on: "{last_turn.get("question", "")}"\n'
                 f"New question: {question}\n"
                 "Proceeding directly to execution with prior context."
             )
@@ -53,7 +67,8 @@ def reason_and_plan(question: str, schema: str, structural_kg: dict, diagnostic_
         lines.append("The above is the prior analysis. Plan the follow-up question below accordingly.")
         context_section = "\n".join(lines)
 
-    prompt = prompts.format(prompts.load("reasoning_prompt.md"),
+    prompt = prompts.format(
+        prompts.load("reasoning_prompt.md"),
         reasoning_framework=reasoning_framework,
         schema=schema,
         structural_kg=format_structural_kg(structural_kg) if isinstance(structural_kg, dict) else structural_kg,
@@ -106,8 +121,28 @@ def build_step_summary(analysis_state: list[dict]) -> str:
     return "\n".join(lines)
 
 
-def agentic_answer(question: str, df, schema: str, structural_kg: dict, diagnostic_kg: dict, reasoning_framework: str, context: list[dict] = None, custom_instructions: list[str] = None, graph: KnowledgeGraph = None, metric_brief: str = "") -> str:
-    reasoning, plan, strategy, persona = reason_and_plan(question, schema, structural_kg, diagnostic_kg, reasoning_framework, context=context, custom_instructions=custom_instructions, metric_brief=metric_brief)
+def agentic_answer(
+    question: str,
+    df,
+    schema: str,
+    structural_kg: dict,
+    diagnostic_kg: dict,
+    reasoning_framework: str,
+    context: list[dict] | None = None,
+    custom_instructions: list[str] | None = None,
+    graph: KnowledgeGraph | None = None,
+    metric_brief: str = "",
+) -> str:
+    reasoning, plan, strategy, persona = reason_and_plan(
+        question,
+        schema,
+        structural_kg,
+        diagnostic_kg,
+        reasoning_framework,
+        context=context,
+        custom_instructions=custom_instructions,
+        metric_brief=metric_brief,
+    )
 
     print("\n  [Phase 1] Reasoning:")
     if strategy:
@@ -120,7 +155,7 @@ def agentic_answer(question: str, df, schema: str, structural_kg: dict, diagnost
         print(f"    {i}. {step}")
     print()
 
-    plan_text = "\n".join(f"  {i+1}. {step}" for i, step in enumerate(plan))
+    plan_text = "\n".join(f"  {i + 1}. {step}" for i, step in enumerate(plan))
 
     context_section = ""
     if context:
@@ -142,9 +177,7 @@ def agentic_answer(question: str, df, schema: str, structural_kg: dict, diagnost
                 "If a metric genuinely cannot be computed from the data, do NOT substitute a different kind of value; state plainly why (in business language, not jargon) and move on."
             )
         else:
-            phase1 = (
-                "PHASE 1 — METRICS: Compute EVERY KPI in the brief (current value + delta vs prior period) using the exact Measurement formula and EXACT column names. Also compute its operational metrics (drivers). Use lookup_metric for any metric definition."
-            )
+            phase1 = "PHASE 1 — METRICS: Compute EVERY KPI in the brief (current value + delta vs prior period) using the exact Measurement formula and EXACT column names. Also compute its operational metrics (drivers). Use lookup_metric for any metric definition."
         metric_brief_str = f"""
 
 METRIC BRIEF — these are the pre-defined KPIs and operational metrics (drivers) for this priority:
@@ -160,7 +193,8 @@ OUTPUT FORMAT (structured per-KPI insight):
       Implication: <...>
       [If KPI is off] By <dimension>: <where the issue originates> → <why>
 """
-    system = f"""You are a data analyst investigating a question about data.
+    system = (
+        f"""You are a data analyst investigating a question about data.
 
 COLUMN NAMES AND TYPES:
 {schema}
@@ -186,7 +220,9 @@ If a step fails, analyze the error and try a corrected version.
 
 METRIC CATALOG: Use lookup_metric to retrieve precise formulas for any KPI or metric mentioned in the question. Do NOT guess formulas — look them up.
 
-KNOWLEDGE GRAPH: Use traverse_graph to explore relationships between metrics, dimensions, and business goals. This helps you understand what influences a metric, what it depends on, and how it connects to other business concepts.""" + metric_brief_str
+KNOWLEDGE GRAPH: Use traverse_graph to explore relationships between metrics, dimensions, and business goals. This helps you understand what influences a metric, what it depends on, and how it connects to other business concepts."""
+        + metric_brief_str
+    )
 
     strategy_section = prompts.extract_strategy_section(strategy)
     strategy_guide = f"\n\nSTRATEGY GUIDE:\n{strategy_section}" if strategy_section else ""
@@ -210,7 +246,7 @@ Begin your analysis. Execute the first step of your plan."""
 
     print("  [Phase 3] Executing plan...", flush=True)
 
-    analysis_state = []
+    analysis_state: list = []
     _tool_choice = "required"
     _text_only_strikes = 0
     _loop_start = time.time()
@@ -251,11 +287,13 @@ Begin your analysis. Execute the first step of your plan."""
                 try:
                     args = json.loads(tool_call.function.arguments)
                 except json.JSONDecodeError:
-                    messages.append({
-                        "role": "tool",
-                        "tool_call_id": tool_call.id,
-                        "content": f"Error: invalid JSON in tool arguments: {tool_call.function.arguments[:200]}",
-                    })
+                    messages.append(
+                        {
+                            "role": "tool",
+                            "tool_call_id": tool_call.id,
+                            "content": f"Error: invalid JSON in tool arguments: {tool_call.function.arguments[:200]}",
+                        }
+                    )
                     continue
 
                 if fn_name == "execute_code":
@@ -274,7 +312,10 @@ Begin your analysis. Execute the first step of your plan."""
                     if success:
                         out_display = output
                         if len(out_display) > CONFIG.max_output_chars:
-                            out_display = out_display[:CONFIG.max_output_chars] + f"\n... [output truncated to {CONFIG.max_output_chars} chars]"
+                            out_display = (
+                                out_display[: CONFIG.max_output_chars]
+                                + f"\n... [output truncated to {CONFIG.max_output_chars} chars]"
+                            )
                         result = f"Step {iteration + 1} completed successfully.\nOutput:\n{out_display}\n\nAll variables and df columns you created are available for future steps."
                     else:
                         _ns["df"] = df_before
@@ -328,10 +369,12 @@ Begin your analysis. Execute the first step of your plan."""
                 ans = "n"
             if ans in ("y", "yes"):
                 limit += CONFIG.continuation_block
-                messages.append({
-                    "role": "user",
-                    "content": f"User approved {CONFIG.continuation_block} additional steps. You have {CONFIG.continuation_block} more steps of budget — keep investigating; do NOT wrap up yet.",
-                })
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": f"User approved {CONFIG.continuation_block} additional steps. You have {CONFIG.continuation_block} more steps of budget — keep investigating; do NOT wrap up yet.",
+                    }
+                )
             else:
                 declined = True
                 break
@@ -339,17 +382,19 @@ Begin your analysis. Execute the first step of your plan."""
     reason = "you declined to continue" if declined else "the step budget was reached"
     print(f"\n  [Phase 4] Requesting final answer ({reason})...")
     state_summary = build_step_summary(analysis_state)
-    messages.append({
-        "role": "user",
-        "content": f"""You have completed {limit} steps of analysis ({reason}).
+    messages.append(
+        {
+            "role": "user",
+            "content": f"""You have completed {limit} steps of analysis ({reason}).
 You MUST now provide your final answer using the final_answer tool.
 
 {state_summary}
 
 Synthesize ALL findings above into a comprehensive answer.
 If some steps failed, work with what succeeded.
-Call final_answer NOW."""
-    })
+Call final_answer NOW.""",
+        }
+    )
 
     for attempt in range(3):
         msg = llm.chat_with_tools(messages, temperature=0.4)
@@ -367,7 +412,7 @@ Call final_answer NOW."""
                     code = args.get("code", "")
                     success, output = sandbox.execute_in_namespace(code, _ns)
                     if len(output) > CONFIG.max_output_chars:
-                        output = output[:CONFIG.max_output_chars] + f"\n... [output truncated to {CONFIG.max_output_chars} chars]"
+                        output = output[: CONFIG.max_output_chars] + f"\n... [output truncated to {CONFIG.max_output_chars} chars]"
                     result = f"Step (final synthesis): {'OK' if success else 'ERROR'}\n{output}"
                     messages.append({"role": "tool", "tool_call_id": tool_call.id, "content": result})
         if attempt < 2:

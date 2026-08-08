@@ -10,11 +10,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
 from src.analyst.sandbox import (
     BLOCKED_SUBSTRINGS,
-    DENIED_ATTRIBUTES,
-    FORBIDDEN_AST_NODES,
-    PANDAS_EXEC_METHODS,
     SAFE_BUILTINS,
-    _check_ast_safe,
+    check_ast_safe,
 )
 
 _SKIP = {"pd", "json", "np", "math"}
@@ -75,7 +72,7 @@ def main() -> None:
     except SyntaxError as e:
         _fail(namespace, out_path, f"Syntax error: {e}")
 
-    msg = _check_ast_safe(tree)
+    msg = check_ast_safe(tree)
     if msg:
         _fail(namespace, out_path, f"Blocked: {msg}")
 

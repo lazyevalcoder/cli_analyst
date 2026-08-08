@@ -2,8 +2,14 @@ import json
 import re
 import threading
 import time
+from typing import Any, cast
 
 from openai import OpenAI
+from openai.types.chat import (
+    ChatCompletionMessageParam,
+    ChatCompletionToolChoiceOptionParam,
+    ChatCompletionToolParam,
+)
 
 from src.analyst.config import CONFIG
 
@@ -31,6 +37,7 @@ def _call_with_heartbeat(fn, label: str = "Waiting for model"):
         stop.set()
         thread.join(timeout=0.5)
 
+
 TOOLS = [
     {
         "type": "function",
@@ -39,15 +46,10 @@ TOOLS = [
             "description": "Execute Python code on the DataFrame. The DataFrame is available as 'df'. Use pandas for data manipulation. Print results to see output.",
             "parameters": {
                 "type": "object",
-                "properties": {
-                    "code": {
-                        "type": "string",
-                        "description": "Python code to execute"
-                    }
-                },
-                "required": ["code"]
-            }
-        }
+                "properties": {"code": {"type": "string", "description": "Python code to execute"}},
+                "required": ["code"],
+            },
+        },
     },
     {
         "type": "function",
@@ -56,15 +58,10 @@ TOOLS = [
             "description": "Provide the final answer to the user's question. Use this after you have gathered enough information from executing code.",
             "parameters": {
                 "type": "object",
-                "properties": {
-                    "answer": {
-                        "type": "string",
-                        "description": "The final answer to the user's question"
-                    }
-                },
-                "required": ["answer"]
-            }
-        }
+                "properties": {"answer": {"type": "string", "description": "The final answer to the user's question"}},
+                "required": ["answer"],
+            },
+        },
     },
     {
         "type": "function",
@@ -76,12 +73,12 @@ TOOLS = [
                 "properties": {
                     "name": {
                         "type": "string",
-                        "description": "The name of the metric to look up (e.g., 'Revenue Growth Trajectory')"
+                        "description": "The name of the metric to look up (e.g., 'Revenue Growth Trajectory')",
                     }
                 },
-                "required": ["name"]
-            }
-        }
+                "required": ["name"],
+            },
+        },
     },
     {
         "type": "function",
@@ -93,17 +90,17 @@ TOOLS = [
                 "properties": {
                     "node": {
                         "type": "string",
-                        "description": "The name or ID of the node to explore (e.g., 'Revenue', 'Discount %')"
+                        "description": "The name or ID of the node to explore (e.g., 'Revenue', 'Discount %')",
                     },
                     "relation": {
                         "type": "string",
-                        "description": "Optional: filter by relationship type (e.g., 'INFLUENCES', 'DERIVED_FROM', 'SUPPORTS'). Leave empty to show all."
-                    }
+                        "description": "Optional: filter by relationship type (e.g., 'INFLUENCES', 'DERIVED_FROM', 'SUPPORTS'). Leave empty to show all.",
+                    },
                 },
-                "required": ["node"]
-            }
-        }
-    }
+                "required": ["node"],
+            },
+        },
+    },
 ]
 
 
@@ -112,16 +109,18 @@ def get_client() -> OpenAI:
 
 
 def _retry(fn, *args, **kwargs):
-    last_error = None
+    last_error: Exception | None = None
     for attempt in range(CONFIG.max_retries):
         try:
             return fn(*args, **kwargs)
         except Exception as e:
             last_error = e
             if attempt < CONFIG.max_retries - 1:
-                delay = CONFIG.retry_base_delay * (2 ** attempt)
+                delay = CONFIG.retry_base_delay * (2**attempt)
                 time.sleep(delay)
-    raise last_error
+    if last_error is not None:
+        raise last_error
+    raise RuntimeError("retry loop exhausted without error")  # unreachable: max_retries >= 1
 
 
 def check_availability() -> bool:
@@ -133,8 +132,7 @@ def check_availability() -> bool:
         return False
 
 
-def ask(user_question: str, system_context: str = "", temperature: float = 0.3,
-        label: str = "Waiting for model") -> str:
+def ask(user_question: str, system_context: str = "", temperature: float = 0.3, label: str = "Waiting for model") -> str:
     client = get_client()
     messages = []
     if system_context:
@@ -144,7 +142,7 @@ def ask(user_question: str, system_context: str = "", temperature: float = 0.3,
     def call():
         response = client.chat.completions.create(
             model=CONFIG.model,
-            messages=messages,
+            messages=cast("list[ChatCompletionMessageParam]", messages),
             temperature=temperature,
             max_tokens=CONFIG.max_tokens,
             extra_body={"thinking_budget_tokens": CONFIG.thinking_budget_tokens},
@@ -158,15 +156,19 @@ def ask(user_question: str, system_context: str = "", temperature: float = 0.3,
     return _call_with_heartbeat(lambda: _retry(call), label)
 
 
-def ask_json(user_question: str, system_context: str = "", temperature: float = 0.1,
-             retries: int = 2, label: str = "Waiting for model") -> dict:
+def ask_json(
+    user_question: str, system_context: str = "", temperature: float = 0.1, retries: int = 2, label: str = "Waiting for model"
+) -> dict:
     for attempt in range(retries + 1):
         response = ask(user_question, system_context, temperature=temperature, label=label)
         result = extract_json(response)
         if result:
             return result
         if attempt < retries:
-            user_question = "Your previous response was not valid JSON. Respond with ONLY a valid JSON object, no other text.\n\n" + user_question
+            user_question = (
+                "Your previous response was not valid JSON. Respond with ONLY a valid JSON object, no other text.\n\n"
+                + user_question
+            )
     return {}
 
 
@@ -200,8 +202,13 @@ def extract_json(response: str) -> dict:
     return {}
 
 
-def chat_with_tools(messages: list, tools: list = None, temperature: float = 0.2, tool_choice: str = "auto",
-                    label: str = "Waiting for model"):
+def chat_with_tools(
+    messages: list,
+    tools: list[Any] | None = None,
+    temperature: float = 0.2,
+    tool_choice: str = "auto",
+    label: str = "Waiting for model",
+):
     client = get_client()
     if tools is None:
         tools = TOOLS
@@ -209,9 +216,9 @@ def chat_with_tools(messages: list, tools: list = None, temperature: float = 0.2
     def call():
         response = client.chat.completions.create(
             model=CONFIG.model,
-            messages=messages,
-            tools=tools,
-            tool_choice=tool_choice,
+            messages=cast("list[ChatCompletionMessageParam]", messages),
+            tools=cast("list[ChatCompletionToolParam]", tools),
+            tool_choice=cast("ChatCompletionToolChoiceOptionParam", tool_choice),
             temperature=temperature,
             extra_body={"thinking_budget_tokens": CONFIG.thinking_budget_tokens},
         )

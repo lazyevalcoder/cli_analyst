@@ -1,10 +1,12 @@
 import json
 import threading
-from http.server import HTTPServer, BaseHTTPRequestHandler
+from collections.abc import Sequence
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
+from typing import Any
 from urllib.parse import parse_qs, urlparse
 
-import markdown
+import markdown  # type: ignore[import-untyped]
 import pandas as pd
 
 HTML_PATH = Path(__file__).parent / "viewer.html"
@@ -91,19 +93,19 @@ def _md_to_html(text: str) -> str:
         return f"<pre>{text}</pre>"
 
 
-def _preprocess_markdown(data: dict, view_type: str):
-    if view_type == "analysis_turns":
-        if isinstance(data, list):
-            for turn in data:
-                if "summary" in turn and isinstance(turn["summary"], str):
-                    turn["summary_html"] = _md_to_html(turn["summary"])
+def _preprocess_markdown(data: "dict[Any, Any] | Sequence[Any]", view_type: str):
+    if view_type == "analysis_turns" and isinstance(data, list):
+        for turn in data:
+            if "summary" in turn and isinstance(turn["summary"], str):
+                turn["summary_html"] = _md_to_html(turn["summary"])
     elif view_type == "briefing":
-        insights = data.get("priority_insights", [])
-        for item in insights:
-            if "insight" in item and isinstance(item["insight"], str):
-                item["insight_html"] = _md_to_html(item["insight"])
-    elif view_type == "priorities":
-        for pri in data if isinstance(data, list) else []:
+        if isinstance(data, dict):
+            insights = data.get("priority_insights", [])
+            for item in insights:
+                if "insight" in item and isinstance(item["insight"], str):
+                    item["insight_html"] = _md_to_html(item["insight"])
+    elif view_type == "priorities" and isinstance(data, list):
+        for pri in data:
             if "description" in pri and isinstance(pri["description"], str):
                 pri["description_html"] = _md_to_html(pri["description"])
             if "analysis_summary" in pri and isinstance(pri["analysis_summary"], str):
@@ -111,7 +113,7 @@ def _preprocess_markdown(data: dict, view_type: str):
 
 
 class _Handler(BaseHTTPRequestHandler):
-    projects_base: Path = None
+    projects_base: Path | None = None
 
     def _json_response(self, data, status: int = 200):
         self.send_response(status)
@@ -132,6 +134,7 @@ class _Handler(BaseHTTPRequestHandler):
 
     def _safe_path(self, rel_path: str) -> Path | None:
         norm = rel_path.replace("\\", "/").lstrip("/")
+        assert self.projects_base is not None, "projects_base must be set before serving"
         requested = (self.projects_base / norm).resolve()
         base_resolved = self.projects_base.resolve()
         try:
@@ -217,6 +220,7 @@ class _Handler(BaseHTTPRequestHandler):
             self._html_response()
 
         elif path == "/api/tree":
+            assert self.projects_base is not None
             tree = _build_projects_tree(self.projects_base)
             self._json_response({"projects": tree})
 

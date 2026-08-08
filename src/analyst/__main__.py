@@ -2,7 +2,7 @@ import argparse
 import sys
 from pathlib import Path
 
-from src.analyst.project import init_project, open_project, ANALYST_META, PROJECTS_DIR
+from src.analyst.project import ANALYST_META, PROJECTS_DIR, init_project, open_project
 from src.analyst.shell import AnalystShell
 from src.analyst.storage import load_json
 
@@ -11,10 +11,7 @@ def _scan_projects() -> list[Path]:
     projects_root = Path.cwd() / PROJECTS_DIR
     if not projects_root.exists():
         return []
-    return sorted(
-        p for p in projects_root.iterdir()
-        if p.is_dir() and (p / ANALYST_META).exists()
-    )
+    return sorted(p for p in projects_root.iterdir() if p.is_dir() and (p / ANALYST_META).exists())
 
 
 def _project_summary(root: Path) -> dict:
@@ -46,7 +43,9 @@ def _list_projects(projects: list[Path]) -> None:
     print("  " + "-" * 70)
     for i, p in enumerate(projects, 1):
         s = _project_summary(p)
-        print(f"  {i:>2d}  {p.name:20s}  {s['data']:22s}  {s['schema']:>4s}  {s['skg_n']:>5s}  {s['dkg_c']:>5s}  {s['analyses']:>4s}")
+        print(
+            f"  {i:>2d}  {p.name:20s}  {s['data']:22s}  {s['schema']:>4s}  {s['skg_n']:>5s}  {s['dkg_c']:>5s}  {s['analyses']:>4s}"
+        )
 
 
 def _interactive() -> None:

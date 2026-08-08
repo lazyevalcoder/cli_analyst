@@ -1,6 +1,7 @@
 import ast
 import builtins
 import json
+import logging
 import pickle
 import subprocess
 import sys
@@ -11,11 +12,25 @@ import pandas as pd
 
 from src.analyst.config import CONFIG
 
+logger = logging.getLogger(__name__)
+
 BLOCKED_SUBSTRINGS = [
-    "import os", "import sys", "import subprocess", "import shutil",
-    "import pathlib", "open(", "exec(", "eval(", "compile(",
-    "__import__", "globals(", "locals(", "vars(",
-    "breakpoint", "pdb", "importlib",
+    "import os",
+    "import sys",
+    "import subprocess",
+    "import shutil",
+    "import pathlib",
+    "open(",
+    "exec(",
+    "eval(",
+    "compile(",
+    "__import__",
+    "globals(",
+    "locals(",
+    "vars(",
+    "breakpoint",
+    "pdb",
+    "importlib",
 ]
 
 SAFE_BUILTINS = {
@@ -51,9 +66,18 @@ SAFE_BUILTINS = {
 }
 
 DENIED_ATTRIBUTES = {
-    "__import__", "__builtins__", "__class__", "__bases__",
-    "__subclasses__", "__globals__", "__code__", "__closure__",
-    "__dict__", "__init__", "__getattribute__", "__reduce__",
+    "__import__",
+    "__builtins__",
+    "__class__",
+    "__bases__",
+    "__subclasses__",
+    "__globals__",
+    "__code__",
+    "__closure__",
+    "__dict__",
+    "__init__",
+    "__getattribute__",
+    "__reduce__",
 }
 
 PANDAS_EXEC_METHODS = {"eval", "query", "exec"}
@@ -65,7 +89,7 @@ _SKIP = {"pd", "json", "np", "math"}
 _WORKER = Path(__file__).with_name("sandbox_worker.py")
 
 
-def _check_ast_safe(tree: ast.AST) -> str | None:
+def check_ast_safe(tree: ast.AST) -> str | None:
     for node in ast.walk(tree):
         if isinstance(node, FORBIDDEN_AST_NODES):
             names = [a.name for a in node.names] if isinstance(node, ast.Import) else [a.name for a in node.names]
@@ -107,11 +131,13 @@ def _make_namespace(df: pd.DataFrame) -> dict:
     ns = {"df": df, "pd": pd, "json": json}
     try:
         import numpy as np
+
         ns["np"] = np
     except ImportError:
         pass
     try:
         import math
+
         ns["math"] = math
     except ImportError:
         pass
@@ -139,7 +165,7 @@ def _execute_internal(code: str, namespace: dict, df: pd.DataFrame = None) -> tu
     except SyntaxError as e:
         return False, f"Syntax error: {e}"
 
-    msg = _check_ast_safe(tree)
+    msg = check_ast_safe(tree)
     if msg:
         return False, f"Blocked: {msg}"
 
@@ -167,8 +193,8 @@ def _execute_internal(code: str, namespace: dict, df: pd.DataFrame = None) -> tu
                 with open(out_path, "rb") as f:
                     loaded = pickle.load(f)
                 _restore_namespace(namespace, loaded)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("could not restore sandbox state from worker: %s", e)
 
         if result.returncode != 0:
             return False, (result.stderr or "worker error").strip()

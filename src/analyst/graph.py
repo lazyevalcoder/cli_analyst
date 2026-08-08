@@ -3,10 +3,20 @@ from __future__ import annotations
 import json
 import re
 from pathlib import Path
-from typing import Optional
+
+from src.analyst.constants import (
+    CATALOG_NODE_TYPES,
+    NODE_TYPE_KPI,
+    NODE_TYPE_OPERATIONAL_METRIC,
+    RELATION_DERIVED_FROM,
+    RELATION_INFLUENCES,
+    SOURCE_LLM_GENERATED,
+    SOURCE_STRUCTURAL_KG,
+    SOURCE_USER_OVERRIDE,
+)
 
 
-def _slugify(name: str, sep: str = "_") -> str:
+def slugify(name: str, sep: str = "_") -> str:
     return re.sub(r"[^a-z0-9]+", sep, name.lower()).strip(sep)
 
 
@@ -45,7 +55,7 @@ def format_diagnostic_kg(kg: dict) -> str:
 
 
 class KnowledgeGraph:
-    def __init__(self, nodes: list[dict] = None, edges: list[dict] = None):
+    def __init__(self, nodes: list[dict] | None = None, edges: list[dict] | None = None):
         self._nodes: list[dict] = nodes or []
         self._edges: list[dict] = edges or []
 
@@ -57,7 +67,7 @@ class KnowledgeGraph:
         path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
 
     @classmethod
-    def load(cls, path: Path) -> "KnowledgeGraph":
+    def load(cls, path: Path) -> KnowledgeGraph:
         if not path.exists():
             return cls()
         try:
@@ -76,12 +86,14 @@ class KnowledgeGraph:
         return cls()
 
     @classmethod
-    def _from_entries(cls, entries: list[dict]) -> "KnowledgeGraph":
+    def _from_entries(cls, entries: list[dict]) -> KnowledgeGraph:
         nodes = []
         edges = []
         for e in entries:
             kind = e.get("kind", "")
-            node_type = "kpi" if kind == "kpi" else ("operational_metric" if kind == "supporting_metric" else "kpi")
+            node_type = (
+                NODE_TYPE_KPI if kind == "kpi" else (NODE_TYPE_OPERATIONAL_METRIC if kind == "supporting_metric" else NODE_TYPE_KPI)
+            )
             node = {
                 "id": e.get("id", ""),
                 "name": e.get("name", ""),
@@ -94,17 +106,19 @@ class KnowledgeGraph:
             }
             nodes.append(node)
             for target_id in e.get("influences", []):
-                edges.append({
-                    "source": node["id"],
-                    "target": target_id,
-                    "relation": "INFLUENCES",
-                })
+                edges.append(
+                    {
+                        "source": node["id"],
+                        "target": target_id,
+                        "relation": RELATION_INFLUENCES,
+                    }
+                )
         return cls(nodes, edges)
 
     # ---- build from priorities (replaces MetricCatalog.build_from) ----
 
     @classmethod
-    def build_from(cls, priorities: list[dict]) -> "KnowledgeGraph":
+    def build_from(cls, priorities: list[dict]) -> KnowledgeGraph:
         seen = set()
         nodes = []
         edges = []
@@ -113,156 +127,180 @@ class KnowledgeGraph:
             kpis = pri.get("kpis", [])
             if kpis:
                 for k in kpis:
-                    kid = _slugify(k.get("name", ""))
+                    kid = slugify(k.get("name", ""))
                     if kid and kid not in seen:
                         seen.add(kid)
-                        nodes.append({
-                            "id": kid,
-                            "name": k.get("name", ""),
-                            "type": "kpi",
-                            "priority": pname,
-                            "metric": k.get("metric", ""),
-                            "description": k.get("description", ""),
-                            "measurement": k.get("measurement", ""),
-                            "source": "llm-generated",
-                        })
+                        nodes.append(
+                            {
+                                "id": kid,
+                                "name": k.get("name", ""),
+                                "type": NODE_TYPE_KPI,
+                                "priority": pname,
+                                "metric": k.get("metric", ""),
+                                "description": k.get("description", ""),
+                                "measurement": k.get("measurement", ""),
+                                "source": SOURCE_LLM_GENERATED,
+                            }
+                        )
                     for op in k.get("operational_metrics", []):
-                        oid = _slugify(op.get("name", ""))
+                        oid = slugify(op.get("name", ""))
                         if oid and oid not in seen:
                             seen.add(oid)
-                            nodes.append({
-                                "id": oid,
-                                "name": op.get("name", ""),
-                                "type": "operational_metric",
-                                "priority": pname,
-                                "metric": op.get("metric", ""),
-                                "description": op.get("description", ""),
-                                "measurement": op.get("measurement", ""),
-                                "source": "llm-generated",
-                            })
+                            nodes.append(
+                                {
+                                    "id": oid,
+                                    "name": op.get("name", ""),
+                                    "type": NODE_TYPE_OPERATIONAL_METRIC,
+                                    "priority": pname,
+                                    "metric": op.get("metric", ""),
+                                    "description": op.get("description", ""),
+                                    "measurement": op.get("measurement", ""),
+                                    "source": SOURCE_LLM_GENERATED,
+                                }
+                            )
                         if oid and kid:
-                            edges.append({
-                                "source": oid,
-                                "target": kid,
-                                "relation": "INFLUENCES",
-                            })
+                            edges.append(
+                                {
+                                    "source": oid,
+                                    "target": kid,
+                                    "relation": RELATION_INFLUENCES,
+                                }
+                            )
                 continue
             eqs = pri.get("executive_questions", [])
             if eqs and isinstance(eqs[0], dict):
                 for eq in eqs:
                     eq_name = eq.get("question", "")
                     for k in eq.get("kpis", []):
-                        kid = _slugify(k.get("name", ""))
+                        kid = slugify(k.get("name", ""))
                         if kid and kid not in seen:
                             seen.add(kid)
-                            nodes.append({
-                                "id": kid,
-                                "name": k.get("name", ""),
-                                "type": "kpi",
-                                "priority": pname,
-                                "executive_question": eq_name,
-                                "metric": k.get("metric", ""),
-                                "description": k.get("description", ""),
-                                "measurement": k.get("measurement", ""),
-                                "source": "llm-generated",
-                            })
+                            nodes.append(
+                                {
+                                    "id": kid,
+                                    "name": k.get("name", ""),
+                                    "type": NODE_TYPE_KPI,
+                                    "priority": pname,
+                                    "executive_question": eq_name,
+                                    "metric": k.get("metric", ""),
+                                    "description": k.get("description", ""),
+                                    "measurement": k.get("measurement", ""),
+                                    "source": SOURCE_LLM_GENERATED,
+                                }
+                            )
                     for s in eq.get("supporting_metrics", []):
-                        sid = _slugify(s.get("name", ""))
+                        sid = slugify(s.get("name", ""))
                         if sid and sid not in seen:
                             seen.add(sid)
-                            nodes.append({
-                                "id": sid,
-                                "name": s.get("name", ""),
-                                "type": "operational_metric",
-                                "priority": pname,
-                                "executive_question": eq_name,
-                                "metric": s.get("metric", ""),
-                                "description": s.get("description", ""),
-                                "measurement": s.get("measurement", ""),
-                                "source": "llm-generated",
-                            })
+                            nodes.append(
+                                {
+                                    "id": sid,
+                                    "name": s.get("name", ""),
+                                    "type": NODE_TYPE_OPERATIONAL_METRIC,
+                                    "priority": pname,
+                                    "executive_question": eq_name,
+                                    "metric": s.get("metric", ""),
+                                    "description": s.get("description", ""),
+                                    "measurement": s.get("measurement", ""),
+                                    "source": SOURCE_LLM_GENERATED,
+                                }
+                            )
                         for ref in s.get("influences", []):
-                            ref_id = _slugify(ref)
+                            ref_id = slugify(ref)
                             if ref_id:
-                                edges.append({
-                                    "source": sid,
-                                    "target": ref_id,
-                                    "relation": "INFLUENCES",
-                                })
+                                edges.append(
+                                    {
+                                        "source": sid,
+                                        "target": ref_id,
+                                        "relation": RELATION_INFLUENCES,
+                                    }
+                                )
                 continue
             for k in pri.get("kpis", []):
-                kid = _slugify(k.get("name", ""))
+                kid = slugify(k.get("name", ""))
                 if kid and kid not in seen:
                     seen.add(kid)
-                    nodes.append({
-                        "id": kid,
-                        "name": k.get("name", ""),
-                        "type": "kpi",
-                        "priority": pname,
-                        "metric": k.get("metric", ""),
-                        "description": k.get("description", ""),
-                        "measurement": k.get("measurement", ""),
-                        "source": "llm-generated",
-                    })
+                    nodes.append(
+                        {
+                            "id": kid,
+                            "name": k.get("name", ""),
+                            "type": NODE_TYPE_KPI,
+                            "priority": pname,
+                            "metric": k.get("metric", ""),
+                            "description": k.get("description", ""),
+                            "measurement": k.get("measurement", ""),
+                            "source": SOURCE_LLM_GENERATED,
+                        }
+                    )
             for s in pri.get("supporting_metrics", []):
-                sid = _slugify(s.get("name", ""))
+                sid = slugify(s.get("name", ""))
                 if sid and sid not in seen:
                     seen.add(sid)
-                    nodes.append({
-                        "id": sid,
-                        "name": s.get("name", ""),
-                        "type": "operational_metric",
-                        "priority": pname,
-                        "metric": s.get("metric", ""),
-                        "description": s.get("description", ""),
-                        "measurement": s.get("measurement", ""),
-                        "source": "llm-generated",
-                    })
+                    nodes.append(
+                        {
+                            "id": sid,
+                            "name": s.get("name", ""),
+                            "type": NODE_TYPE_OPERATIONAL_METRIC,
+                            "priority": pname,
+                            "metric": s.get("metric", ""),
+                            "description": s.get("description", ""),
+                            "measurement": s.get("measurement", ""),
+                            "source": SOURCE_LLM_GENERATED,
+                        }
+                    )
                 for ref in s.get("influences", []):
-                    ref_id = _slugify(ref)
+                    ref_id = slugify(ref)
                     if ref_id:
-                        edges.append({
-                            "source": sid,
-                            "target": ref_id,
-                            "relation": "INFLUENCES",
-                        })
+                        edges.append(
+                            {
+                                "source": sid,
+                                "target": ref_id,
+                                "relation": RELATION_INFLUENCES,
+                            }
+                        )
         return cls(nodes, edges)
 
     # ---- build unified graph from all sources ----
 
     @classmethod
-    def build_from_kgs(cls, structural_kg: dict, diagnostic_kg: dict, priorities: list[dict]) -> "KnowledgeGraph":
+    def build_from_kgs(cls, structural_kg: dict, diagnostic_kg: dict, priorities: list[dict]) -> KnowledgeGraph:
         graph = cls.build_from(priorities)
         existing_ids = {n["id"] for n in graph._nodes}
 
         for node in structural_kg.get("nodes", []):
             nid = node.get("id", "")
             if nid and nid not in existing_ids:
-                graph._nodes.append({
-                    "id": nid,
-                    "name": node.get("label", nid),
-                    "type": node.get("type", "unknown"),
-                    "source": "structural-kg",
-                })
+                graph._nodes.append(
+                    {
+                        "id": nid,
+                        "name": node.get("label", nid),
+                        "type": node.get("type", "unknown"),
+                        "source": SOURCE_STRUCTURAL_KG,
+                    }
+                )
                 existing_ids.add(nid)
 
         for edge in structural_kg.get("edges", []):
-            graph._edges.append({
-                "source": edge.get("source", ""),
-                "target": edge.get("target", ""),
-                "relation": edge.get("relation", ""),
-            })
+            graph._edges.append(
+                {
+                    "source": edge.get("source", ""),
+                    "target": edge.get("target", ""),
+                    "relation": edge.get("relation", ""),
+                }
+            )
 
         for chain in diagnostic_kg.get("chains", []):
             path = chain.get("path", [])
             for i in range(len(path) - 1):
-                src = _slugify(path[i])
-                tgt = _slugify(path[i + 1])
-                graph._edges.append({
-                    "source": src,
-                    "target": tgt,
-                    "relation": "DERIVED_FROM",
-                })
+                src = slugify(path[i])
+                tgt = slugify(path[i + 1])
+                graph._edges.append(
+                    {
+                        "source": src,
+                        "target": tgt,
+                        "relation": RELATION_DERIVED_FROM,
+                    }
+                )
 
         return graph
 
@@ -270,18 +308,18 @@ class KnowledgeGraph:
 
     @property
     def entries(self) -> list[dict]:
-        return [n for n in self._nodes if n.get("type") in ("kpi", "operational_metric", "supporting_metric")]
+        return [n for n in self._nodes if n.get("type") in CATALOG_NODE_TYPES]
 
     def __len__(self) -> int:
         return len(self.entries)
 
-    def list(self, kind: str = None) -> list[dict]:
+    def list_entries(self, kind: str | None = None) -> list[dict]:
         entries = self.entries
         if kind:
             return [e for e in entries if e.get("type") == kind]
         return list(entries)
 
-    def get(self, name_or_id: str) -> Optional[dict]:
+    def get(self, name_or_id: str) -> dict | None:
         lower = name_or_id.strip().lower()
         for n in self._nodes:
             if n.get("id") == lower or n.get("name", "").lower() == lower:
@@ -307,11 +345,11 @@ class KnowledgeGraph:
             return False
         if field in ("description", "measurement", "metric"):
             node[field] = value
-            node["source"] = "user-override"
+            node["source"] = SOURCE_USER_OVERRIDE
             return True
         return False
 
-    def reset(self, name_or_id: str, priorities: list[dict] = None) -> bool:
+    def reset(self, name_or_id: str, priorities: list[dict] | None = None) -> bool:
         old = self.get(name_or_id)
         if not old:
             return False
@@ -346,7 +384,7 @@ class KnowledgeGraph:
 
     # ---- graph traversal ----
 
-    def traverse(self, node_id: str, relation: str = None, direction: str = "incoming") -> list[dict]:
+    def traverse(self, node_id: str, relation: str | None = None, direction: str = "incoming") -> list[dict]:
         lower_id = node_id.strip().lower()
         results = []
         for edge in self._edges:
@@ -356,23 +394,27 @@ class KnowledgeGraph:
             tgt = edge.get("target", "").lower()
             if direction in ("incoming", "both") and tgt == lower_id:
                 n = self._find_node(edge["source"])
-                results.append({
-                    "node": n,
-                    "node_id": edge["source"],
-                    "relation": edge.get("relation", ""),
-                    "direction": "incoming",
-                })
+                results.append(
+                    {
+                        "node": n,
+                        "node_id": edge["source"],
+                        "relation": edge.get("relation", ""),
+                        "direction": "incoming",
+                    }
+                )
             if direction in ("outgoing", "both") and src == lower_id:
                 n = self._find_node(edge["target"])
-                results.append({
-                    "node": n,
-                    "node_id": edge["target"],
-                    "relation": edge.get("relation", ""),
-                    "direction": "outgoing",
-                })
+                results.append(
+                    {
+                        "node": n,
+                        "node_id": edge["target"],
+                        "relation": edge.get("relation", ""),
+                        "direction": "outgoing",
+                    }
+                )
         return results
 
-    def _find_node(self, node_id: str) -> Optional[dict]:
+    def _find_node(self, node_id: str) -> dict | None:
         for n in self._nodes:
             if n.get("id", "").lower() == node_id.lower():
                 return n
@@ -389,7 +431,7 @@ class KnowledgeGraph:
 
     # ---- display helpers ----
 
-    def format_traverse(self, node_id: str, relation: str = None) -> str:
+    def format_traverse(self, node_id: str, relation: str | None = None) -> str:
         results = self.traverse(node_id, relation, direction="both")
         if not results:
             return f"No connections found for '{node_id}'."
@@ -401,17 +443,14 @@ class KnowledgeGraph:
         return "\n".join(lines)
 
     def format_summary(self) -> str:
-        types = {}
+        types: dict[str, int] = {}
         for n in self._nodes:
             t = n.get("type", "unknown")
             types[t] = types.get(t, 0) + 1
         type_counts = ", ".join(f"{k}: {v}" for k, v in sorted(types.items()))
-        rel_counts = {}
+        rel_counts: dict[str, int] = {}
         for e in self._edges:
             r = e.get("relation", "unknown")
             rel_counts[r] = rel_counts.get(r, 0) + 1
         rel_str = ", ".join(f"{k}: {v}" for k, v in sorted(rel_counts.items()))
-        return (
-            f"  Nodes ({len(self._nodes)}): {type_counts}\n"
-            f"  Edges ({len(self._edges)}): {rel_str}"
-        )
+        return f"  Nodes ({len(self._nodes)}): {type_counts}\n  Edges ({len(self._edges)}): {rel_str}"

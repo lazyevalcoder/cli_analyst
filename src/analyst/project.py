@@ -1,8 +1,6 @@
-import json
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
 
 from src.analyst.storage import load_json, save_json
 
@@ -20,11 +18,11 @@ class Project:
     root: Path
     created_at: str = ""
     updated_at: str = ""
-    data_path: Optional[Path] = None
+    data_path: Path | None = None
     schema: dict = field(default_factory=dict)
     structural_kg: dict = field(default_factory=lambda: {"nodes": [], "edges": []})
     diagnostic_kg: dict = field(default_factory=lambda: {"chains": [], "dimensions_affecting": {}, "hypotheses": []})
-    current_analysis: Optional[str] = None
+    current_analysis: str | None = None
     reasoning_framework: str = ""
     priorities: list = field(default_factory=list)
     priority_framework: dict = field(default_factory=dict)
@@ -97,8 +95,9 @@ class Project:
         self.current_analysis = meta.get("current_analysis")
         self.schema = load_json(self.metadata_dir / "schema.json", {})
         self.structural_kg = load_json(self.graphs_dir / "structural.json", {"nodes": [], "edges": []})
-        self.diagnostic_kg = load_json(self.graphs_dir / "diagnostic.json",
-                                       {"chains": [], "dimensions_affecting": {}, "hypotheses": []})
+        self.diagnostic_kg = load_json(
+            self.graphs_dir / "diagnostic.json", {"chains": [], "dimensions_affecting": {}, "hypotheses": []}
+        )
         self.reasoning_framework = load_json(self.metadata_dir / "reasoning_framework.json", {}).get("text", "")
         self.priorities = load_json(self.metadata_dir / "priorities.json", [])
         self.priority_framework = load_json(self.metadata_dir / "priority_framework.json", {})
