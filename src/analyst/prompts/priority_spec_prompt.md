@@ -116,5 +116,6 @@ RULES:
   - Never emit a spec whose counted rows fall outside the resolved time windows (e.g. counting records that carry no date in the period's time column) — the result is 0 vs 0 and the delta is undefined.
   - If a metric cannot be computed as specified, OMIT it — do not substitute a different value kind.
 - Use EXACT column names from the schema.
+- LITERALS: a `condition` / numerator/denominator condition that filters a categorical column MUST use only the exact member literals listed under DISTINCT VALUES for that column — never invent a value (e.g. a deal-stage name not in the list). If the value is not listed, do not filter on it.
 
 Output ONLY a JSON array. No code fences, no commentary.

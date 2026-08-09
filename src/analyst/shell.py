@@ -536,7 +536,7 @@ class AnalystShell(cmd.Cmd):
         period = self._stored_period()
         if not period or not period.get("date_column"):
             return
-        schema_str = builder.extract_schema(self.df)
+        schema_str = builder.build_schema_with_enums(self.df)
         try:
             dim = builder.suggest_breakdown_dimensions(pri, self.df, schema_str, period)
         except Exception:
@@ -576,7 +576,8 @@ class AnalystShell(cmd.Cmd):
             f"Each LLM call times out after {CONFIG.llm_timeout_seconds}s if the model hangs.)",
             flush=True,
         )
-        schema_str = builder.extract_schema(self.df)
+        schema_str = builder.build_schema_with_enums(self.df)
+        period = (getattr(self.project, "priority_framework", None) or {}).get("period") or {}
 
         existing: dict | None = None
         rec = self._priority_values_record(pri)
@@ -602,7 +603,7 @@ class AnalystShell(cmd.Cmd):
             self.project.priority_values = merged
             self.project.save()
 
-        result = builder.compute_priority_values(pri, self.df, schema_str, existing=existing, on_progress=persist)
+        result = builder.compute_priority_values(pri, self.df, schema_str, existing=existing, on_progress=persist, period=period)
         persist(result)
         prec = result["priorities"].get(pname, {})
         self._ensure_breakdowns(pri, prec)
@@ -675,7 +676,7 @@ class AnalystShell(cmd.Cmd):
             print("  No stored values to verify.")
             return
         period = self._stored_period()
-        schema_str = builder.extract_schema(self.df)
+        schema_str = builder.build_schema_with_enums(self.df)
         print(f"  Verifying [{pname}]...")
         values, lsum = builder._verify_layers(values, self.df, period)
         print(builder._format_verify_summary(lsum))
@@ -726,16 +727,27 @@ class AnalystShell(cmd.Cmd):
         if sub == "regenerate":
             if not self._require_data() or not self.project.has_structural_kg():
                 return
-            schema_str = builder.extract_schema(self.df)
+            schema_str = builder.build_schema_with_enums(self.df)
+            print("  Resolving anchoring time period...", end="", flush=True)
+            try:
+                period = builder.resolve_period(self.df, schema_str)
+            except Exception as e:
+                period = {}
+                print(f" failed ({e}); proceeding unanchored.", flush=True)
+            else:
+                print(f" ok — {period.get('definition_text', '')}", flush=True)
             print("  Regenerating strategic priorities...", end="", flush=True)
             try:
-                framework = builder.identify_priorities(schema_str, self.project.structural_kg, self.project.diagnostic_kg)
+                framework = builder.identify_priorities(
+                    schema_str, self.project.structural_kg, self.project.diagnostic_kg, period=period
+                )
                 priorities = framework.get("priorities", [])
                 if priorities:
                     self.project.priorities = priorities
                     self.project.priority_framework = {
                         "domain": framework.get("domain", ""),
                         "health_indicators": framework.get("health_indicators", []),
+                        "period": period,
                     }
                     self.project.priority_values = {}
                     self.project.save()
@@ -743,6 +755,14 @@ class AnalystShell(cmd.Cmd):
                     self._catalog.save(self.project.metric_catalog_path)
                     self._build_unified_graph()
                     print(" done")
+                    warnings = builder.scan_priority_viability(priorities, period, self.df)
+                    if warnings:
+                        print("\n  Viability scan (deterministic, pre-compute):")
+                        for pri_name, mname, reason in warnings:
+                            print(f"    [{pri_name}] {mname}: {reason}")
+                        print("  These metrics will not compute as delta. Regenerate or edit them before 'priorities compute'.\n")
+                    else:
+                        print("  Viability scan: all metrics pass the deterministic data gate.")
                 else:
                     print(" skipped (empty result)")
             except Exception as e:
@@ -795,7 +815,7 @@ class AnalystShell(cmd.Cmd):
             analysis_dir = self.project.analyses_dir / slug
             analysis_dir.mkdir(parents=True, exist_ok=True)
 
-            schema_str = builder.extract_schema(self.df)
+            schema_str = builder.build_schema_with_enums(self.df)
             values_rec = self._ensure_priority_values(pri)
             metric_brief = builder.format_priority_metric_brief(
                 pri,
@@ -926,6 +946,12 @@ class AnalystShell(cmd.Cmd):
                 self.project.save()
                 print("\n  Interpret interrupted.")
                 return
+            if builder._looks_like_reasoning(summary):
+                cleaned = builder._clean_interpretation(summary)
+                print("  Note: stripped LLM reasoning scaffolding from the interpretation.", flush=True)
+                if not cleaned:
+                    cleaned = summary
+                summary = cleaned
             pri["interpretation_summary"] = summary
             pri["interpreted_at"] = datetime.now().isoformat(timespec="seconds")
             self.project.save()
@@ -990,6 +1016,13 @@ class AnalystShell(cmd.Cmd):
                     print("\n  Executive questions (framing):")
                     for q in eqs:
                         print(f"    • {q}")
+                sub_qs = pri.get("sub_questions", [])
+                if sub_qs:
+                    print("\n  Sub-questions (reasoning):")
+                    for q in sub_qs:
+                        if isinstance(q, dict):
+                            q = q.get("question", "?")
+                        print(f"    · {q}")
                 for k in kpis:
                     kn = k.get("name", "?")
                     km = k.get("metric", "")

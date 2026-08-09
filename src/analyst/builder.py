@@ -80,6 +80,30 @@ def extract_schema(df: pd.DataFrame) -> str:
     return "\n".join(lines)
 
 
+def build_schema_with_enums(df: pd.DataFrame, max_cardinality: int = 20) -> str:
+    """extract_schema() plus a DISTINCT VALUES section listing the actual members of
+    low-cardinality categorical columns, so downstream LLMs use real literals instead
+    of inventing them (e.g. invented deal-stage names in conditions/measurements)."""
+    text = extract_schema(df)
+    lines: list[str] = []
+    for col in df.columns:
+        s = df[col]
+        if pd.api.types.is_numeric_dtype(s.dtype) or pd.api.types.is_datetime64_any_dtype(s.dtype):
+            continue
+        unique = s.dropna().astype(str).unique()
+        if len(unique) < 2 or len(unique) > max_cardinality:
+            continue
+        members = sorted(str(v) for v in unique)
+        lines.append(f"  - {col}: {members}")
+    if not lines:
+        return text
+    text += (
+        "\n\nDISTINCT VALUES (use these EXACT literals for conditions/filters on a column;"
+        " never invent members):\n" + "\n".join(lines)
+    )
+    return text
+
+
 def _validate_structural_kg(kg: dict) -> dict:
     if not isinstance(kg, dict):
         return {"nodes": [], "edges": []}
@@ -184,17 +208,30 @@ def get_full_reasoning_framework(schema: str, structural_kg: dict, diagnostic_kg
     return f"{generic_framework}\n\n{context_text}"
 
 
-def identify_priorities(schema: str, structural_kg: dict, diagnostic_kg: dict) -> dict:
+def identify_priorities(schema: str, structural_kg: dict, diagnostic_kg: dict, period: dict | None = None) -> dict:
     """Generate the strategic priority framework from schema + KGs.
 
-    Returns a dict with `domain`, `health_indicators`, and `priorities` (the new
-    outcome → executive questions → KPIs → operational metrics → lenses model).
+    `period` (the resolved anchoring period) is rendered into the prompt so every
+    delta metric is anchored to the SAME time column and windows the compute stage
+    will use. Returns a dict with `domain`, `health_indicators`, and `priorities`
+    (the new outcome → executive questions → KPIs → operational metrics → lenses model).
     """
+    anchor_column = None
+    period_definition = None
+    if isinstance(period, dict):
+        anchor_column = period.get("date_column")
+        period_definition = period.get("definition_text")
+    if not anchor_column:
+        anchor_column = "none detected — treat the dataset as a single snapshot (LEVEL metrics only) unless a time column is resolved later"
+    if not period_definition:
+        period_definition = "not resolved yet"
     prompt = prompts.render(
         "priorities_prompt.md",
         schema=schema,
         structural_kg=str(structural_kg),
         diagnostic_kg=str(diagnostic_kg),
+        anchor_column=anchor_column,
+        period_definition=period_definition,
     )
     raw = llm.ask_json(prompt, system_context="You are a strategy consultant. Return only valid JSON.")
     if not isinstance(raw, dict):
@@ -627,6 +664,12 @@ _FRIENDLY_REASON_MAP = [
     ),
     (re.compile(r"no valid spec produced", re.I), "No valid computation definition could be produced for this metric."),
     (
+        re.compile(r"counts 0 rows in both the current and prior period windows", re.I),
+        "This metric sees no activity in either the current or prior period window, so no change can "
+        "be computed. The records it counts likely carry no date in the anchor column — redefine it "
+        "as a snapshot (LEVEL) or re-anchor it to another date column.",
+    ),
+    (
         re.compile(r"template returned null", re.I),
         "The metric's formula returned no value — for example, an empty prior period or a division by zero.",
     ),
@@ -915,6 +958,13 @@ def _validate_spec(spec: dict, columns: set, batch_names: set | None = None) -> 
                 return False, f"topk_share fractional k must be in (0,1], got {k}"
             if k is None or not isinstance(k, (int, float)):
                 return False, f"topk_share k must be a positive int or a fraction in (0,1], got {k}"
+
+    # A top-level `group_by` is only meaningful for topk_share. On any other agg
+    # (share/ratio/sum/...) it is silently ignored by the executor, so a "share by
+    # <dim>" spec collapses to whole-frame share (1.0) and the delta is always 0 —
+    # reject instead of storing a guaranteed-garbage value.
+    if spec.get("group_by") is not None and spec.get("agg") != "topk_share":
+        return False, "group_by is only valid for agg 'topk_share'; express a share-by-dimension metric as a scalar (top-segment share or a where-clause filtered aggregate)"
 
     # ---- composition: input_ref ----
     ref = spec.get("input_ref")
@@ -1415,6 +1465,33 @@ def suggest_breakdown_dimensions(pri: dict, df: pd.DataFrame, schema_str: str, p
     return {"column": fallback["column"], "rationale": "Auto-selected: highest data coverage across both periods."}
 
 
+def _breakdown_degenerate_for_dim(spec: dict, dcol: str) -> bool:
+    """True when a metric's per-member breakdown on `dcol` collapses to constants
+    (1.0/0.0 everywhere) instead of real movement — i.e. the spec is structurally bound
+    to that column: a condition selecting a single member of it, or a group-by share on
+    it. Such metrics are legitimate scalars but have NO meaningful per-member cells
+    (re-deriving on `df[dcol] == member` fuses the metric's own filter with the cell's
+    filter: numerator == denominator -> 1/1 -> delta 0, all other members 0/0 -> delta 0).
+    Skipping the row (Overall remains, member cells render as '—') honours the rule book's
+    "honest not_computable" — no substituted or fabricated numbers."""
+    if not dcol or not isinstance(spec, dict):
+        return False
+    quoted = (f"'{dcol}'", f'"{dcol}"')
+    conds = [spec.get("condition")]
+    for role in ("numerator", "denominator"):
+        sub = spec.get(role)
+        if isinstance(sub, dict):
+            conds.append(sub.get("condition"))
+    if any(isinstance(c, str) and any(q in c for q in quoted) for c in conds):
+        return True
+    if spec.get("agg") == "topk_share" and spec.get("group_by") == dcol:
+        return True
+    for step in spec.get("steps") or []:
+        if step.get("op") == "group" and step.get("group_by") == dcol and step.get("inner_agg") == "share":
+            return True
+    return False
+
+
 def compute_priority_breakdowns(pri: dict, df: pd.DataFrame, values: dict, period: dict, dimension: dict) -> dict:
     """Per-member metric values for one dimension, reusing each computed metric's stored
     spec. Returns {dimension_column: {metric_name: [{member, current, prior, delta, unit,
@@ -1432,6 +1509,9 @@ def compute_priority_breakdowns(pri: dict, df: pd.DataFrame, values: dict, perio
         spec = rec.get("spec")
         if not isinstance(spec, dict):
             continue
+        if _breakdown_degenerate_for_dim(spec, dcol):
+            logger.debug("breakdown for %r skipped on %r: spec is structurally bound to the dimension", mname, dcol)
+            continue
         cells = []
         for member in members:
             sub = df[df[dcol].astype(str) == str(member)]
@@ -1444,8 +1524,78 @@ def compute_priority_breakdowns(pri: dict, df: pd.DataFrame, values: dict, perio
     return {dcol: out}
 
 
+def _anchor_preflight(specs: list[dict], df: pd.DataFrame, period: dict) -> tuple[list[dict], dict[str, str]]:
+    """Deterministic per-metric gate run BEFORE the grouped script.
+
+    Probes each period-over-period spec's RAW current and prior scalars with the exact
+    cell template the engine will run. A metric counting 0 rows in BOTH windows (0 vs 0)
+    cannot produce a meaningful delta — its counted records carry no date in the anchor
+    column inside the windows (e.g. active deals whose lifecycle date is blank), or fall
+    entirely outside them. Flag those as not_computable here so no 0-vs-0 value or
+    misleading 0.0 style-point-diff leaks into a report.
+
+    Returns (keep, flagged): specs that pass the gate, and {name: reason} for the rest.
+    """
+    keep: list[dict] = []
+    flagged: dict[str, str] = {}
+    anchor = period.get("date_column")
+    for spec in specs:
+        if not isinstance(spec, dict) or str(spec.get("compare", "level")) == "level":
+            keep.append(spec)
+            continue
+        cur = pri = None
+        try:
+            code = _build_cell_script(spec, period)
+            ok, out = sandbox.execute_code(code, df)
+            parsed = _parse_compute_output(out) if ok else {}
+            cur, pri = parsed.get("_cur"), parsed.get("_pri")
+        except Exception as e:
+            logger.debug("anchor preflight probe failed for %r: %s", spec.get("name"), e)
+        if cur is None or pri is None:
+            keep.append(spec)
+            continue
+        if float(cur) == 0 and float(pri) == 0:
+            flagged[str(spec.get("name", ""))] = (
+                "this metric counts 0 rows in both the current and prior period windows "
+                "(0 vs 0), so no period-over-period delta exists. The counted records "
+                f"carry no date in the anchor column ({anchor or 'none'}) that falls inside "
+                "the windows. Redefine it as a LEVEL snapshot or anchor it to another date column."
+            )
+            continue
+        keep.append(spec)
+    return keep, flagged
+
+
+def scan_priority_viability(priorities: list, period: dict, df: pd.DataFrame) -> list[tuple[str, str, str]]:
+    """Deterministic pre-compute scan over every proposed metric in a framework.
+
+    Runs the data-limited / baseline / anchor gates (the same ones `compute_priority_values`
+    uses to pre-filter). Returns (priority_name, metric_name, reason) warnings so metrics
+    that cannot compute as delta are corrected right after `regenerate`, before an
+    expensive compute run. No LLM involved.
+    """
+    warnings_list: list[tuple[str, str, str]] = []
+    for pri in priorities or []:
+        if not isinstance(pri, dict):
+            continue
+        pname = pri.get("name", "?")
+        for _, metric in _iter_priority_metrics(pri):
+            mname = str(metric.get("name", ""))
+            if not mname:
+                continue
+            reason, _prim = _precheck_measurement(metric.get("measurement", ""), period, df)
+            if reason:
+                warnings_list.append((pname, mname, reason))
+    return warnings_list
+
+
 def compute_priority_values(
-    pri: dict, df: pd.DataFrame, schema_str: str, existing: dict | None = None, on_progress: Callable[..., None] | None = None
+    pri: dict,
+    df: pd.DataFrame,
+    schema_str: str,
+    existing: dict | None = None,
+    on_progress: Callable[..., None] | None = None,
+    period: dict | None = None,
 ) -> dict:
     """Resolve every KPI + operational metric in `pri` to ONE scalar and persist the structure.
 
@@ -1457,9 +1607,14 @@ def compute_priority_values(
     with a final status are treated as done and never recomputed. `on_progress`, if given,
     is called after each group with the full result structure so the caller can persist
     incrementally (Ctrl+C keeps completed groups).
+
+    `period` optionally supplies the already-resolved anchoring period (persisted at
+    regenerate) so generation and compute share the exact same windows; when omitted it
+    is resolved here.
     """
-    print("  Resolving time period...", flush=True)
-    period = resolve_period(df, schema_str)
+    if not period or not period.get("definition_text"):
+        print("  Resolving time period...", flush=True)
+        period = resolve_period(df, schema_str)
     print(f"  Period: {period['definition_text']}", flush=True)
 
     columns = set(str(c) for c in df.columns)
@@ -1606,6 +1761,24 @@ def compute_priority_values(
                         period,
                         measurements.get(m, ""),
                         reasons.get(m, "no valid spec produced"),
+                    )
+                break
+            valid, anchor_flagged = _anchor_preflight(valid, df, period)
+            if anchor_flagged:
+                for m in sorted(anchor_flagged):
+                    if m in missing:
+                        values[m] = _nc_record(period, measurements.get(m, ""), anchor_flagged[m])
+                        missing.remove(m)
+                        reasons.pop(m, None)
+                    print(f"    {m}: preflight shows 0 rows in BOTH current and prior windows — delta undefined; not computed.", flush=True)
+            if not valid:
+                if missing and attempt == 1:
+                    continue
+                for m in missing:
+                    values[m] = _nc_record(
+                        period,
+                        measurements.get(m, ""),
+                        reasons.get(m, "no valid spec produced after anchor preflight"),
                     )
                 break
             code = build_metric_script(valid, period)
@@ -1974,11 +2147,77 @@ def verify_priority_values(pri: dict, df: pd.DataFrame, values: dict, period: di
 
 def interpret_priority(pri: dict, values: dict, breakdowns: dict | None = None) -> str:
     """Quick tier: one LLM call narrating stored values (+ dimension breakdowns)."""
+    eqs = pri.get("executive_questions", [])
+    if isinstance(eqs, list) and eqs:
+        first = eqs[0]
+        eq_text = first if isinstance(first, str) else first.get("question", "") if isinstance(first, dict) else ""
+    else:
+        eq_text = ""
     prompt = prompts.render(
         "interpret_priority_prompt.md",
         priority_name=pri.get("name", ""),
         priority_description=pri.get("description", ""),
+        executive_question=eq_text,
         values=json.dumps(values, ensure_ascii=False, indent=2),
         breakdowns=json.dumps(breakdowns or {}, ensure_ascii=False, indent=2),
     )
-    return llm.ask(prompt, system_context="You are a business analyst.").strip()
+    text = llm.ask(prompt, system_context="You are a business analyst.").strip()
+    return _clean_interpretation(text)
+
+
+_REASONING_MARKERS = (
+    "**",
+    "\u2705",  # ✅
+    "\u2713",  # ✓
+    "->",
+    "=>",
+    "*(",
+    "[Output",
+    "[Text Output",
+    "[(Done",
+    "Self-Correction",
+    "count sentences",
+    "Let's draft",
+    "Let's count",
+    "Check constraints",
+    "Structure Requirements",
+    "OFF RULE",
+    "OFF Rule",
+    "Output Generation",
+    "Proceeds",
+)
+
+
+def _looks_like_reasoning(text: str) -> bool:
+    """True when a stored interpretation contains obvious LLM reasoning scaffold —
+    prompt echo, self-checks, output-generation doodads — instead of the final answer."""
+    return any(m in text for m in _REASONING_MARKERS)
+
+
+def _is_clean_paragraph(p: str) -> bool:
+    """A final narrative answer: no reasoning markers, not a huge reasoning block,
+    and at least two sentences (the interpretation prompt demands 3-6)."""
+    if _looks_like_reasoning(p):
+        return False
+    if len(p) > 1200:
+        return False
+    sentences = [s for s in re.split(r"(?<=[.!?])\s+", p) if s.strip()]
+    return len(sentences) >= 2
+
+
+def _clean_interpretation(text) -> str:
+    """Extract the final narrative answer from an LLM response that may embed its
+    chain-of-thought (the model dumps reasoning into `content` for some providers).
+
+    The clean answer is the model's last clean paragraph. Loop from the end and return
+    the first paragraph that reads like one; fall back to the raw text when nothing does
+    (i.e. the model already answered cleanly or produced an unparseable blob).
+    """
+    text = (text or "").strip()
+    if not text:
+        return text
+    paragraphs = [p.strip() for p in re.split(r"\n\s*\n+", text) if p.strip()]
+    for p in reversed(paragraphs):
+        if _is_clean_paragraph(p):
+            return p
+    return text

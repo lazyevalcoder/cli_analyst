@@ -189,6 +189,93 @@ class TestInterpretUsesBreakdowns:
         assert builder.interpret_priority(_pri(), _values()) == "summary"
 
 
+class TestDegenerateBreakdownsSkipped:
+    """Regression: a metric structurally bound to the breakdown dimension (condition
+    selecting one of its members, or a group-by share on it) collapses to 1.0/0.0 cells —
+    the all-zero rows the user saw for "Express Ship Mode Volume Share" and "Corporate
+    Segment Profit Share Change". Its per-member cells must be skipped entirely."""
+
+    def _locked_values(self):
+        spec = {
+            "name": "Corporate Share",
+            "agg": "share",
+            "numerator": {"agg": "sum", "value_column": "sales", "condition": "df['segment'] == 'Corp'"},
+            "denominator": {"agg": "sum", "value_column": "sales"},
+            "compare": "pp_change",
+            "unit": "ratio",
+        }
+        return {
+            "Corporate Share": {
+                "status": "computed",
+                "value": -0.05,
+                "unit": "ratio",
+                "basis": "cur 0.5 vs pri 0.55",
+                "spec": spec,
+            }
+        }
+
+    def test_condition_locked_spec_is_degenerate(self):
+        spec = self._locked_values()["Corporate Share"]["spec"]
+        assert builder._breakdown_degenerate_for_dim(spec, "segment") is True
+        assert builder._breakdown_degenerate_for_dim(spec, "region") is False
+
+    def test_group_share_and_topk_share_degenerate(self):
+        group_share = {"steps": [{"op": "group", "group_by": "segment", "inner_agg": "share", "value": "sales", "outer_agg": "max"}]}
+        topk = {"agg": "topk_share", "group_by": "segment", "k": 1}
+        assert builder._breakdown_degenerate_for_dim(group_share, "segment") is True
+        assert builder._breakdown_degenerate_for_dim(topk, "segment") is True
+
+    def test_unrelated_condition_not_degenerate(self):
+        # High-Margin share style: condition on a different column -> meaningful cells.
+        spec = {
+            "agg": "share",
+            "value_column": "sales",
+            "condition": "df['margin'] > 0.5",
+        }
+        assert builder._breakdown_degenerate_for_dim(spec, "segment") is False
+
+    def test_locked_metric_row_omitted_from_matrix(self):
+        dim = {"column": "segment", "members": ["Corp", "SMB"]}
+        values = {"Revenue": _values()["Revenue"], **self._locked_values()}
+        b = builder.compute_priority_breakdowns(_pri(), _df(), values, _period(), dim)
+        assert "Revenue" in b["segment"]
+        assert "Corporate Share" not in b["segment"]
+
+
+class TestInterpretCleaner:
+    """Regression: interpret responses leaked the model's chain-of-thought into the
+    stored interpretation_summary (prompt echo, sentence counting, output-generation
+    doodads). The cleaner must keep only the final narrative answer."""
+
+    def test_clean_text_passes_through(self):
+        text = "The priority is on track. Sales grew 12%, led by the West region. Executives should keep investing."
+        assert builder._clean_interpretation(text) == text
+
+    def test_reasoning_scaffold_is_stripped_to_final_answer(self):
+        text = (
+            "- **OFF RULE:** flag KPIs below threshold.\n"
+            "   - Structure Requirements:\n"
+            "     - OPEN: verdict with north-star KPI.\n"
+            "Let's count sentences: 5. Fits the 3-6 constraint.\n"
+            "   Draft: The priority is off track, as Q4 shows mix declining.\n"
+            "   *(Self-Correction)*: keep it tight.\n"
+            "\n"
+            "response\n"
+            "\n"
+            "The priority is off track, as Q4-2013 data shows our high-margin share fell 14.4 points. "
+            "All metrics are verified and computed. Executives must immediately rebalance pricing now."
+        )
+        out = builder._clean_interpretation(text)
+        assert "**" not in out
+        assert "\u2705" not in out
+        assert "response" not in out
+        assert out.startswith("The priority is off track, as Q4-2013")
+
+    def test_looks_like_reasoning_flags_polluted_only(self):
+        assert builder._looks_like_reasoning("Let's draft carefully. Count: 5. ✅") is True
+        assert builder._looks_like_reasoning("The priority is on track. Growth is healthy.") is False
+
+
 class TestShellPersistence:
     def test_ensure_priority_values_persists_breakdowns(self, monkeypatch):
         from src.analyst.shell import AnalystShell

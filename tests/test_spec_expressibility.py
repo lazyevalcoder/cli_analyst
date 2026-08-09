@@ -284,6 +284,49 @@ class TestComposedSteps:
         _assert_exec(out["value"], 1.0)  # only agent C is new
 
 
+class TestGroupByOnlyForTopkShare:
+    """Regression: a 'share by <dim>' spec used group_by on agg=share, which the executor
+    ignores (whole-frame share -> 1.0/1.0 -> delta 0) and stored as a guaranteed-zero
+    metric. The validator must reject it at spec time."""
+
+    def test_group_by_rejected_on_share(self):
+        spec = {
+            "name": "Category Volume Share",
+            "agg": "share",
+            "value_column": "value",
+            "group_by": "agent",
+            "compare": "pp_change",
+            "unit": "ratio",
+        }
+        ok, msg = builder._validate_spec(spec, set(_df().columns))
+        assert not ok
+        assert "topk_share" in msg
+
+    def test_group_by_rejected_on_sum(self):
+        spec = {
+            "name": "Metric",
+            "agg": "sum",
+            "value_column": "value",
+            "group_by": "agent",
+            "compare": "pct_change",
+            "unit": "currency",
+        }
+        ok, _ = builder._validate_spec(spec, set(_df().columns))
+        assert not ok
+
+    def test_group_by_still_valid_for_topk_share(self):
+        spec = {
+            "name": "Top Agent Share",
+            "agg": "topk_share",
+            "value_column": "value",
+            "group_by": "agent",
+            "k": 1,
+            "compare": "level",
+            "unit": "ratio",
+        }
+        assert builder._validate_spec(spec, set(_df().columns))[0]
+
+
 class TestPrecheckDoesNotBlockExpressibleShapes:
     def test_count_share_measurement_flows_to_llm(self):
         period = _period()

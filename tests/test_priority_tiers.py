@@ -1329,7 +1329,7 @@ class TestEngineVersion:
         shell.project = _FakeProject(stored)
         captured = {}
 
-        def fake_compute(pri, df, schema_str, existing=None, on_progress=None):
+        def fake_compute(pri, df, schema_str, existing=None, on_progress=None, period=None):
             captured["existing"] = existing
             return {
                 "generated_at": "t",
@@ -1373,7 +1373,7 @@ class TestEngineVersion:
         shell.project = _FakeProject(stored)
         captured = {}
 
-        def fake_compute(pri, df, schema_str, existing=None, on_progress=None):
+        def fake_compute(pri, df, schema_str, existing=None, on_progress=None, period=None):
             captured["existing"] = existing
             return {
                 "generated_at": "t",
