@@ -1,0 +1,130 @@
+[
+  {
+    "name": "Drive profitable revenue growth",
+    "description": "Expand top-line sales while maintaining or improving net profitability through strategic pricing and fulfillment optimization.",
+    "executive_questions": [
+      "Are we growing sales profitably, or is volume growth eroding margins?"
+    ],
+    "kpis": [
+      {
+        "name": "Net Profit Growth",
+        "metric": "Profit",
+        "description": "Measures the absolute change in net profit over the period, indicating bottom-line expansion.",
+        "measurement": "Percentage change in sum(Profit) compared to the prior period",
+        "operational_metrics": [
+          {
+            "name": "Sales Growth",
+            "metric": "Sales",
+            "description": "Tracks top-line revenue expansion to contextualize profit movement.",
+            "measurement": "Percentage change in sum(Sales) compared to the prior period"
+          },
+          {
+            "name": "Average Discount Rate",
+            "metric": "Discount",
+            "description": "Reveals pricing pressure that may compress margins.",
+            "measurement": "Percentage change in mean(Discount) compared to the prior period"
+          },
+          {
+            "name": "Shipping Cost Ratio",
+            "metric": "Shipping Cost",
+            "description": "Tracks fulfillment cost efficiency relative to revenue.",
+            "measurement": "Percentage change in sum(Shipping Cost) / sum(Sales) compared to the prior period"
+          }
+        ],
+        "analytical_lenses": [
+          "Trends",
+          "Mix shift"
+        ]
+      },
+      {
+        "name": "Profit Margin Delta",
+        "metric": "Profit",
+        "description": "Measures the change in net profitability percentage, isolating margin health from volume effects.",
+        "measurement": "Percentage change in (sum(Profit) / sum(Sales)) compared to the prior period",
+        "operational_metrics": [
+          {
+            "name": "Product Base Margin Shift",
+            "metric": "Product Base Margin",
+            "description": "Reveals changes in inherent product profitability.",
+            "measurement": "Percentage change in mean(Product Base Margin) compared to the prior period"
+          },
+          {
+            "name": "Discount Rate Shift",
+            "metric": "Discount",
+            "description": "Reveals changes in promotional depth affecting net margins.",
+            "measurement": "Percentage change in mean(Discount) compared to the prior period"
+          }
+        ],
+        "analytical_lenses": [
+          "Composition"
+        ]
+      }
+    ]
+  },
+  {
+    "name": "Optimize fulfillment efficiency",
+    "description": "Reduce logistics costs and improve delivery speed to enhance customer satisfaction and protect margins.",
+    "executive_questions": [
+      "Is our fulfillment strategy driving down costs or increasing them?"
+    ],
+    "kpis": [
+      {
+        "name": "Fulfillment Cost per Order",
+        "metric": "Shipping Cost",
+        "description": "Measures the average logistics cost incurred per order, indicating operational efficiency.",
+        "measurement": "Percentage change in mean(Shipping Cost) compared to the prior period",
+        "operational_metrics": [
+          {
+            "name": "Express Air Adoption Rate",
+            "metric": "Ship Mode",
+            "description": "Tracks the proportion of orders using higher-cost express shipping.",
+            "measurement": "Percentage change in count_distinct(Order ID) where Ship Mode='Express Air' / count_distinct(Order ID) compared to the prior period"
+          },
+          {
+            "name": "Average Order Quantity",
+            "metric": "Quantity ordered new",
+            "description": "Reveals if larger order sizes are diluting per-unit shipping costs.",
+            "measurement": "Percentage change in mean(Quantity ordered new) compared to the prior period"
+          }
+        ],
+        "analytical_lenses": [
+          "Velocity",
+          "Mix shift"
+        ]
+      }
+    ]
+  },
+  {
+    "name": "Strengthen customer segment performance",
+    "description": "Identify and capitalize on high-value customer segments to drive sustainable order volume and loyalty.",
+    "executive_questions": [
+      "Which customer segments are driving growth and which are lagging?"
+    ],
+    "kpis": [
+      {
+        "name": "Segment Revenue Share",
+        "metric": "Sales",
+        "description": "Measures the proportion of total revenue contributed by each customer segment, highlighting strategic focus areas.",
+        "measurement": "Percentage change in sum(Sales) for each Customer Segment / sum(Sales) compared to the prior period",
+        "operational_metrics": [
+          {
+            "name": "Segment Order Volume",
+            "metric": "Order ID",
+            "description": "Tracks the number of orders per segment to identify demand shifts.",
+            "measurement": "Percentage change in count_distinct(Order ID) for each Customer Segment compared to the prior period"
+          },
+          {
+            "name": "Segment Average Discount",
+            "metric": "Discount",
+            "description": "Reveals if specific segments require deeper discounts to convert.",
+            "measurement": "Percentage change in mean(Discount) for each Customer Segment compared to the prior period"
+          }
+        ],
+        "analytical_lenses": [
+          "Cohorts",
+          "Mix shift"
+        ]
+      }
+    ]
+  }
+]

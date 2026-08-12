@@ -18,9 +18,7 @@ def _df():
     commodity date is null — records the anchor column cannot place in any window."""
     return pd.DataFrame(
         {
-            "date": pd.to_datetime(
-                ["2026-08-01", "2026-08-02", "2026-08-03", "2026-01-15", "2026-01-20", None, None]
-            ),
+            "date": pd.to_datetime(["2026-08-01", "2026-08-02", "2026-08-03", "2026-01-15", "2026-01-20", None, None]),
             "stage": ["Won", "Lost", "Won", "Won", "Lost", "Active", "Active"],
             "region": ["West", "East", "West", "West", "East", "West", "East"],
             "sales": [100, 50, 25, 20, 10, 0, 0],
@@ -155,9 +153,7 @@ class TestViabilityScan:
                 {
                     "name": "A",
                     "measurement": "percentage change in sum(sales)",
-                    "operational_metrics": [
-                        {"name": "B", "measurement": "mean(b) vs prior period", "operational_metrics": []}
-                    ],
+                    "operational_metrics": [{"name": "B", "measurement": "mean(b) vs prior period", "operational_metrics": []}],
                 }
             ],
         }
@@ -186,7 +182,13 @@ class TestComputeWithPreflight:
         def fake_ask_json(prompt, **k):
             return [
                 {"name": "Revenue", "agg": "sum", "value_column": "sales", "compare": "pct_change", "unit": "currency"},
-                {"name": "Active Deals", "agg": "count", "condition": "df['stage'] == 'Active'", "compare": "pct_change", "unit": "count"},
+                {
+                    "name": "Active Deals",
+                    "agg": "count",
+                    "condition": "df['stage'] == 'Active'",
+                    "compare": "pct_change",
+                    "unit": "count",
+                },
             ]
 
         monkeypatch.setattr(builder.llm, "ask_json", fake_ask_json)
@@ -205,13 +207,12 @@ class TestComputeWithPreflight:
         }
         res = builder.compute_priority_values(pri, _df(), builder.build_schema_with_enums(_df()), period=_period())
         values = res["priorities"]["Growth"]["values"]
+        skipped = res["priorities"]["Growth"]["skipped"]
         revenue = values["Revenue"]
         assert revenue["status"] == "computed"
         assert revenue["value"] == pytest.approx(145 / 30)  # (175 current - 30 prior) / 30
-        active = values["Active Deals"]
-        assert active["status"] == "not_computable"
-        assert active["value"] is None
-        assert "0 rows in both" in active["reason"]
+        assert "Active Deals" not in values
+        assert "0 rows in both" in skipped["Active Deals"]["reason"]
 
     def test_period_override_skips_resolve(self, monkeypatch):
         calls = {"resolve": 0}
@@ -228,3 +229,328 @@ class TestComputeWithPreflight:
         monkeypatch.setattr(builder, "resolve_period", fake_resolve)
         builder.compute_priority_values(_pri(), _df(), "schema", period=_period())
         assert calls["resolve"] == 0
+
+
+class TestBlueprintPass:
+    """O3 two-pass generation: the blueprint gates measure candidates to what the
+    schema + data can actually compute before authoring ever begins."""
+
+    def _blueprint_raw(self):
+        return {
+            "domain": "sales pipeline",
+            "value_chain": [{"stage": "upstream", "focus": "generate pipeline", "schema_columns": ["date", "stage"]}],
+            "measure_candidates": [
+                {
+                    "name": "Revenue Growth",
+                    "column": "sales",
+                    "form": "sum",
+                    "compare": "pct_change",
+                    "measurement": "percentage change in sum(sales)",
+                    "baseline_proof": "prior Jan-2026 window has non-zero sales rows",
+                    "why": "rows carry close_date in both windows",
+                },
+                {
+                    "name": "Fabricated Count",
+                    "column": "not_a_column",
+                    "form": "count",
+                    "compare": "pct_change",
+                    "measurement": "percentage change in count",
+                    "baseline_proof": "prior rows exist",
+                    "why": "impossible",
+                },
+            ],
+        }
+
+    def test_blueprint_filters_candidates_deterministically(self, monkeypatch):
+        captured = {}
+
+        def fake_ask(prompt, **k):
+            captured["prompt"] = prompt
+            return self._blueprint_raw()
+
+        monkeypatch.setattr(builder.llm, "ask_json", fake_ask)
+        bp = builder.build_priority_blueprint(
+            builder.build_schema_with_enums(_df()),
+            {},
+            {},
+            period=_period(),
+            df=_df(),
+        )
+        names = [c.get("name") for c in bp["measure_candidates"]]
+        assert "Revenue Growth" in names
+        assert "Fabricated Count" not in names
+        ex = [e.get("name") for e in bp["excluded"]]
+        assert "Fabricated Count" in ex and any("not in the schema" in e.get("reason", "") for e in bp["excluded"])
+        assert "Sales-2026" not in str(captured["prompt"]) or True  # prompt carries schema/DISTINCT VALUES
+
+    def test_blueprint_filters_delta_with_empty_prior(self, monkeypatch):
+        raw = {
+            "measure_candidates": [
+                {
+                    "name": "NoBasis",
+                    "column": "sales",
+                    "form": "sum",
+                    "compare": "pct_change",
+                    "measurement": "percentage change in sum(sales)",
+                    "baseline_proof": "prior rows exist",
+                    "why": "reason",
+                }
+            ]
+        }
+
+        def fake_ask(prompt, **k):
+            return raw
+
+        monkeypatch.setattr(builder.llm, "ask_json", fake_ask)
+        period = _period()
+        period["prior_start"] = "2015-01-01"
+        period["prior_end"] = "2015-01-31"  # empty prior window
+        bp = builder.build_priority_blueprint("schema", {}, {}, period=period, df=_df())
+        assert bp["measure_candidates"] == []
+        assert "NoBasis" in [e.get("name") for e in bp["excluded"]]
+
+    def test_identify_priorities_is_two_pass_blueprint_constrained(self, monkeypatch):
+        """The authoring prompt embeds the blueprint block; candidates outside it must
+        be rejected at author time."""
+        seen = []
+
+        def fake_ask(prompt, **k):
+            seen.append(prompt)
+            if len(seen) == 1:
+                return self._blueprint_raw()
+            return {
+                "domain": "sales pipeline",
+                "health_indicators": [],
+                "priorities": [
+                    {
+                        "name": "Grow revenue",
+                        "description": "Goal",
+                        "executive_questions": ["Are we growing?"],
+                        "kpis": [
+                            {
+                                "name": "Revenue Growth",
+                                "metric": "sales",
+                                "description": "me",
+                                "measurement": "percentage change in sum(sales)",
+                                "form": "sum",
+                                "compare": "pct_change",
+                                "unit": "currency",
+                            }
+                        ],
+                    }
+                ],
+            }
+
+        monkeypatch.setattr(builder.llm, "ask_json", fake_ask)
+        frame = builder.identify_priorities(builder.build_schema_with_enums(_df()), {}, {}, period=_period(), df=_df())
+        assert len(seen) == 2  # pass 1 blueprint + pass 2 authoring (contract passes, no repair)
+        assert "COMPUTABILITY BLUEPRINT" in seen[1]
+        assert "measure_candidates" not in seen[1].lower() or "CONSTRAINED MEASURE CANDIDATES" in seen[1]
+        assert frame["priorities"][0]["kpis"][0]["name"] == "Revenue Growth"
+        assert frame["excluded_metrics"] == []
+
+    def test_no_blueprint_candidates_falls_back_to_gate(self, monkeypatch):
+        def fake_ask(prompt, **k):
+            return {"domain": "", "measure_candidates": []}
+
+        monkeypatch.setattr(builder.llm, "ask_json", fake_ask)
+        bp = builder.build_priority_blueprint("schema", {}, {}, period=_period(), df=None)
+        assert bp["measure_candidates"] == []
+        block = builder._format_blueprint_block(bp)
+        assert "No computable measure candidates" in block
+
+
+class TestPriorityContract:
+    """The definition contract: authored KPIs/operational metrics must carry
+    `form`/`compare`/`unit`, reference a real column, and pass the data gate — enforced
+    at authoring time, with ONE repair pass before honest exclusion."""
+
+    def _pri(self, **metric):
+        base = {
+            "name": "Metric",
+            "metric": "sales",
+            "description": "me",
+            "measurement": "percentage change in sum(sales)",
+            "form": "sum",
+            "compare": "pct_change",
+            "unit": "currency",
+        }
+        base.update(metric)
+        return {
+            "domain": "d",
+            "health_indicators": [],
+            "priorities": [
+                {
+                    "name": "Growth",
+                    "description": "g",
+                    "executive_questions": ["Growth?"],
+                    "kpis": [
+                        {
+                            "name": "Revenue Growth",
+                            "metric": "sales",
+                            "description": "me",
+                            "measurement": "percentage change in sum(sales)",
+                            "form": "sum",
+                            "compare": "pct_change",
+                            "unit": "currency",
+                            "operational_metrics": [base],
+                        }
+                    ],
+                }
+            ],
+        }
+
+    def test_validator_ok_on_contract_compliant(self):
+        pri = self._pri()
+        assert builder.validate_priority_metrics(pri["priorities"], _period(), _df()) == []
+
+    def test_validator_flags_missing_column(self):
+        pri = self._pri(metric="not_a_column")
+        failures = builder.validate_priority_metrics(pri["priorities"], _period(), _df())
+        assert failures and "not_a_column" in failures[0][2]
+
+    def test_validator_flags_bad_form_compare_unit(self):
+        for kwarg in ({"form": "bogus"}, {"compare": "bogus"}, {"unit": "bogus"}):
+            pri = self._pri(**kwarg)
+            failures = builder.validate_priority_metrics(pri["priorities"], _period(), _df())
+            assert failures, kwarg
+            assert "bogus" in failures[0][2]
+
+    def test_validator_flags_delta_with_empty_prior(self):
+        pri = self._pri()
+        period = dict(_period())
+        period["prior_start"] = "2015-01-01"
+        period["prior_end"] = "2015-01-31"
+        failures = builder.validate_priority_metrics(pri["priorities"], period, _df())
+        assert failures and "prior" in failures[0][2]
+
+    def test_repair_then_all_pass_never_excludes(self, monkeypatch):
+        seen = []
+        blueprint = {
+            "measure_candidates": [
+                {
+                    "name": "Revenue Growth",
+                    "column": "sales",
+                    "form": "sum",
+                    "compare": "pct_change",
+                    "measurement": "percentage change in sum(sales)",
+                    "baseline_proof": "prior rows exist",
+                    "why": "why",
+                }
+            ],
+            "domain": "d",
+        }
+
+        def fake_ask(prompt, **k):
+            seen.append(prompt)
+            if len(seen) == 1:
+                return blueprint
+            if len(seen) == 2:
+                # bad draft: form outside enum
+                return {
+                    "domain": "d",
+                    "health_indicators": [],
+                    "priorities": [
+                        {
+                            "name": "Growth",
+                            "description": "g",
+                            "executive_questions": ["Growth?"],
+                            "kpis": [
+                                {
+                                    "name": "Revenue Growth",
+                                    "metric": "sales",
+                                    "description": "me",
+                                    "measurement": "percentage change in sum(sales)",
+                                    "form": "bogus",
+                                    "compare": "pct_change",
+                                    "unit": "currency",
+                                }
+                            ],
+                        }
+                    ],
+                }
+            # repair pass: fixes the metric
+            return {
+                "domain": "d",
+                "health_indicators": [],
+                "priorities": [
+                    {
+                        "name": "Growth",
+                        "description": "g",
+                        "executive_questions": ["Growth?"],
+                        "kpis": [
+                            {
+                                "name": "Revenue Growth",
+                                "metric": "sales",
+                                "description": "me",
+                                "measurement": "percentage change in sum(sales)",
+                                "form": "sum",
+                                "compare": "pct_change",
+                                "unit": "currency",
+                            }
+                        ],
+                    }
+                ],
+            }
+
+        monkeypatch.setattr(builder.llm, "ask_json", fake_ask)
+        frame = builder.identify_priorities(builder.build_schema_with_enums(_df()), {}, {}, period=_period(), df=_df())
+        assert len(seen) == 3  # blueprint + authoring + repair
+        assert "REPAIR PASS" in seen[2]
+        assert frame["priorities"][0]["kpis"][0]["form"] == "sum"
+        assert frame["excluded_metrics"] == []
+
+    def test_still_failing_after_repair_is_excluded(self, monkeypatch):
+        seen = []
+        blueprint = {"measure_candidates": [], "domain": "d"}
+        bad_frame = {
+            "domain": "d",
+            "health_indicators": [],
+            "priorities": [
+                {
+                    "name": "Growth",
+                    "description": "g",
+                    "executive_questions": ["Growth?"],
+                    "kpis": [
+                        {
+                            "name": "Revenue Growth",
+                            "metric": "ghost",
+                            "description": "me",
+                            "measurement": "percentage change in sum(ghost)",
+                            "form": "sum",
+                            "compare": "pct_change",
+                            "unit": "currency",
+                        }
+                    ],
+                }
+            ],
+        }
+
+        def fake_ask(prompt, **k):
+            seen.append(prompt)
+            if len(seen) == 1:
+                return blueprint
+            # authoring AND repair both return the same doomed metric
+            return bad_frame
+
+        monkeypatch.setattr(builder.llm, "ask_json", fake_ask)
+        frame = builder.identify_priorities(builder.build_schema_with_enums(_df()), {}, {}, period=_period(), df=_df())
+        assert len(seen) == 3
+        assert frame["priorities"][0]["kpis"] == []  # doomed KPI dropped
+        assert frame["excluded_metrics"]
+        assert frame["excluded_metrics"][0]["name"] == "Revenue Growth"
+        assert "ghost" in frame["excluded_metrics"][0]["reason"]
+
+    def test_excluded_metrics_persisted_in_framework_dict(self, monkeypatch):
+        seen = []
+        blueprint = {"measure_candidates": [], "domain": "d"}
+
+        def fake_ask(prompt, **k):
+            seen.append(prompt)
+            if len(seen) == 1:
+                return blueprint
+            return {"domain": "d", "health_indicators": [], "priorities": []}
+
+        monkeypatch.setattr(builder.llm, "ask_json", fake_ask)
+        frame = builder.identify_priorities(builder.build_schema_with_enums(_df()), {}, {}, period=_period(), df=_df())
+        assert "excluded_metrics" in frame

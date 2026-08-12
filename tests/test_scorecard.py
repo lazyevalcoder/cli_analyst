@@ -4,6 +4,8 @@ Verifies the pure connector between persisted priority values/definitions and th
 display payload the viewer's ``/api/scorecard`` endpoint returns.
 """
 
+import json
+
 from src.analyst.scorecard import (
     CELLS,
     COLUMNS,
@@ -20,6 +22,7 @@ from src.analyst.scorecard import (
     VALUE,
     build_scorecard_payload,
 )
+from src.analyst.viewer import _json_safe
 
 # ---------------------------------------------------------------------------
 # Fixtures (mirror the on-disk shapes of priority_values.json / priorities.json)
@@ -193,3 +196,34 @@ class TestBuildScorecardPayload:
     def test_non_dict_priority_records_skipped(self):
         payload = build_scorecard_payload("Acme", {"priorities": {"P1": "junk"}}, [])
         assert payload[SECTIONS] == []
+
+    def test_nan_values_coerced_to_none_in_payload(self):
+        """NaN/inf values (e.g. a 0/0 delta) must serialize as null, not the
+        non-standard `NaN`/`Infinity` JSON tokens strict parsers reject."""
+        priorities, pv = _sample_project()
+        pv["priorities"]["P1"]["values"]["Revenue Growth"]["value"] = float("nan")
+        payload = build_scorecard_payload("Acme", pv, priorities)
+        row = payload[SECTIONS][0][ROWS][0]
+        assert row[OVERALL][VALUE] is None
+        text = json.dumps(payload)
+        assert "NaN" not in text and "Infinity" not in text
+        json.loads(text)  # round-trips as strictly valid JSON
+
+    def test_viewer_json_safe_recursively_nulls_nonfinite(self):
+        """The serialization boundary turns any NaN/inf float into null, wherever it
+        sits in the payload, so the browser's JSON.parse never sees a NaN token."""
+        import math
+
+        data = {
+            "rows": [{"value": float("nan"), "ok": True}],
+            "cells": {"a": float("inf"), "b": -float("inf"), "c": 1.5},
+            "nested": {"x": [float("nan"), 2]},
+        }
+        safe = _json_safe(data)
+        text = json.dumps(safe)
+        assert "NaN" not in text and "Infinity" not in text
+        assert json.loads(text)["rows"][0]["value"] is None
+        assert safe["cells"]["a"] is None and safe["cells"]["b"] is None
+        assert safe["cells"]["c"] == 1.5
+        assert safe["nested"]["x"] == [None, 2]
+        assert math.isfinite(1.5)  # finite floats untouched

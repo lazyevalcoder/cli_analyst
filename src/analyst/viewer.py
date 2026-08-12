@@ -1,4 +1,5 @@
 import json
+import math
 import threading
 from collections.abc import Sequence
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -30,6 +31,23 @@ def _get_file_type(ext: str) -> str:
         return "image"
     else:
         return "text"
+
+
+def _json_safe(value: Any) -> Any:
+    """Recursively replace NaN/inf floats with None so the payload is RFC-8259-valid.
+
+    Python's ``json.dumps`` emits ``NaN``/``Infinity`` literals for non-finite floats,
+    which strict parsers (the scorecard page's ``JSON.parse``) reject. Computed values
+    and breakdown deltas can legitimately be NaN (e.g. a 0/0 delta); they must serialize
+    as ``null``, not crash the page.
+    """
+    if isinstance(value, float):
+        return None if not math.isfinite(value) else value
+    if isinstance(value, dict):
+        return {k: _json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(v) for v in value]
+    return value
 
 
 def _build_node(path: Path, base: Path) -> dict:
@@ -124,7 +142,7 @@ class _Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "application/json")
         self.send_header("Access-Control-Allow-Origin", "*")
         self.end_headers()
-        self.wfile.write(json.dumps(data, indent=2, default=str).encode("utf-8"))
+        self.wfile.write(json.dumps(_json_safe(data), indent=2, default=str).encode("utf-8"))
 
     def _html_response(self, content: str, status: int = 200):
         self.send_response(status)

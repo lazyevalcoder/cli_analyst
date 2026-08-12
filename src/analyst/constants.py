@@ -80,6 +80,7 @@ RESULT_PRIORITIES = "priorities"
 RESULT_PRIORITY_REF = "priority_ref"
 RESULT_PRIORITY_FINGERPRINT = "fingerprint"
 RESULT_VALUES = "values"
+RESULT_SKIPPED = "skipped"
 RESULT_BREAKDOWN_DIMENSIONS = "breakdown_dimensions"
 RESULT_BREAKDOWNS = "breakdowns"
 
@@ -155,6 +156,11 @@ INNER_AGGS = frozenset({"count", "sum", "mean", "median", "std", "min", "max", "
 OUTER_AGGS = frozenset({"mean", "median", "std", "max", "min", "sum"})
 DERIVE_OPS = frozenset({"derive.days_between", "derive.year_of", "derive.month_of", "derive.arithmetic"})
 SUB_AGGS = frozenset({"count", "sum", "mean", "count_distinct"})
+
+# Priority authoring contract: allowed values for the `form` / `compare` / `unit`
+# fields every KPI and operational metric must carry. Mirrors the blueprint enums.
+PRIORITY_FORMS = frozenset({"count", "sum", "mean", "median", "std", "count_distinct", "ratio", "share", "topk_share", "group", "new", "prep"})
+PRIORITY_UNITS = frozenset({"count", "currency", "ratio", "percent", "pp", "days", "other"})
 
 # Bump when the compute engine changes behavior so stored values are forced to recompute.
 COMPUTE_ENGINE_VERSION = "engine-v3-2026-08-02-breakdowns"

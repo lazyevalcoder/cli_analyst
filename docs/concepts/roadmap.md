@@ -147,7 +147,7 @@ Build the fix as **architecture, not examples** — three cooperating pieces:
 4. Verify on `SalesOrders` and `Pipeline Analytics`; then stress-test with a novel dataset (capacity planning / GTM territory design) to prove generalization.
 5. Revisit after the scorecard is stable — blueprint + validator feed naturally into scorecard design/compute.
 
-**Status: decided but not started — no code changes yet.**
+**Status:** O3 blueprint pass (two-pass generation) implemented 2026-08-12 — `blueprint_prompt.md` + `build_priority_blueprint()` in `builder.py`; candidates are filtered deterministically through the same data gates compute uses (`_precheck_measurement` + column membership) so only provably computable measures reach the authoring prompt, which is constrained to them (`{blueprint}` block in `priorities_prompt.md`). The blocked `not_computable` clutter also landed: `compute_priority_values` now writes failures to a compact `skipped` map on the result envelope instead of persisted value records, surfaced via `priorities skipped <n>`. The definition contract landed 2026-08-13: authored KPIs/operational metrics must carry `form`/`compare`/`unit` (enforced by `validate_priority_metrics()` in `builder.py`, reusing the exact compute gates), a deterministic violation triggers ONE repair pass inside `identify_priorities`, and metrics still failing are excluded (returned as `excluded_metrics`, surfaced in the shell, never persisted as metrics). Few-shot bank (step 3) remains future work.
 
 ---
 

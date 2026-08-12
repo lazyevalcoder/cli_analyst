@@ -663,8 +663,9 @@ class TestComputabilityRuleBook:
         monkeypatch.setattr(builder.llm, "ask_json", lambda *a, **k: [dc_spec])
         result = builder.compute_priority_values(_sample_pri(), _sample_df(), "schema")
         values = result["priorities"]["Growth"]["values"]
-        assert values["Growth"]["status"] == "not_computable"
-        assert values["Growth"].get("reason_display")
+        skipped = result["priorities"]["Growth"]["skipped"]
+        assert "Growth" not in values
+        assert skipped["Growth"]["reason"] and builder.friendly_reason(skipped["Growth"]["reason"])
         # Deal Count is a LEVEL count — legitimately computable without a time dimension.
         assert values["Deal Count"]["status"] == "computed"
 
@@ -690,8 +691,9 @@ class TestComputabilityRuleBook:
         monkeypatch.setattr(builder.llm, "ask_json", lambda *a, **k: next(calls))
         result = builder.compute_priority_values(_sample_pri(), _sample_df(), "schema")
         values = result["priorities"]["Growth"]["values"]
-        assert values["Growth"]["status"] == "not_computable"
-        assert values["Growth"]["value"] is None
+        skipped = result["priorities"]["Growth"]["skipped"]
+        assert "Growth" not in values
+        assert skipped["Growth"]["reason"]
 
 
 class TestComputePriorityValues:
@@ -722,9 +724,10 @@ class TestComputePriorityValues:
         monkeypatch.setattr(builder.llm, "ask_json", lambda *a, **k: next(calls))
         result = builder.compute_priority_values(_sample_pri(), _sample_df(), "schema")
         values = result["priorities"]["Growth"]["values"]
+        skipped = result["priorities"]["Growth"]["skipped"]
         assert values["Growth"]["status"] == "computed"
-        assert values["Deal Count"]["status"] == "not_computable"
-        assert "scalar spec" in values["Deal Count"]["reason"]
+        assert "Deal Count" not in values
+        assert "scalar spec" in skipped["Deal Count"]["reason"]
 
     def test_compute_omitted_metric_repaired_on_second_attempt(self, monkeypatch):
         # Omitted on attempt 1, supplied on attempt 2 -> computed (repair pass catches it).
@@ -886,8 +889,8 @@ class TestComputePriorityValues:
         monkeypatch.setattr(builder.llm, "ask_json", lambda *a, **k: next(calls))
         result = builder.compute_priority_values(pri, _sample_df(), "schema")
         values = result["priorities"]["Growth"]["values"]
-        assert values["Stage Velocity"]["status"] == "not_computable"
-        assert values["Stage Velocity"].get("missing_primitive") == "requires stage-entry/transition timestamps"
+        skipped = result["priorities"]["Growth"]["skipped"]
+        assert skipped["Stage Velocity"]["missing_primitive"] == "requires stage-entry/transition timestamps"
         assert values["Growth"]["status"] == "computed"
 
     def test_compute_missing_metric_is_not_computable(self, monkeypatch):
@@ -901,8 +904,10 @@ class TestComputePriorityValues:
         monkeypatch.setattr(builder.llm, "ask_json", lambda *a, **k: next(calls))
         result = builder.compute_priority_values(_sample_pri(), _sample_df(), "schema")
         values = result["priorities"]["Growth"]["values"]
+        skipped = result["priorities"]["Growth"]["skipped"]
         assert values["Growth"]["status"] == "computed"
-        assert values["Deal Count"]["status"] == "not_computable"
+        assert "Deal Count" not in values
+        assert skipped["Deal Count"]["reason"]
 
     def test_compute_null_value_is_not_computable(self, monkeypatch):
         null_spec = dict(_specs()[0], compare="pct_change")
@@ -919,11 +924,13 @@ class TestComputePriorityValues:
         monkeypatch.setattr(builder, "resolve_period", lambda *a, **k: period)
         result = builder.compute_priority_values(_sample_pri(), _sample_df(), "schema")
         values = result["priorities"]["Growth"]["values"]
-        assert values["Growth"]["status"] == "not_computable"
+        skipped = result["priorities"]["Growth"]["skipped"]
+        assert "Growth" not in values
+        assert skipped["Growth"]["reason"]
         assert values["Deal Count"]["status"] == "computed"
 
     def test_compute_zero_prior_null_reason(self, monkeypatch):
-        # pct_change with an empty prior period -> not computed with a plain-language
+        # pct_change with an empty prior period -> skipped with a plain-language
         # reason (rule book: no substitution, no fabricated 0).
         period = _period()
         period["prior_start"] = "2016-01-01"
@@ -933,9 +940,9 @@ class TestComputePriorityValues:
         monkeypatch.setattr(builder.llm, "ask_json", lambda *a, **k: next(calls))
         result = builder.compute_priority_values(_sample_pri(), _sample_df(), "schema")
         values = result["priorities"]["Growth"]["values"]
-        assert values["Growth"]["status"] == "not_computable"
-        assert values["Growth"].get("reason_display")
-        assert "prior comparison period" in values["Growth"]["reason"]
+        skipped = result["priorities"]["Growth"]["skipped"]
+        assert "Growth" not in values
+        assert "prior comparison period" in skipped["Growth"]["reason"]
         assert values["Deal Count"]["status"] == "computed"
 
     def test_compute_persists_spec(self, monkeypatch):
@@ -970,7 +977,9 @@ class TestComputePriorityValues:
         monkeypatch.setattr(builder.llm, "ask_json", lambda *a, **k: next(calls))
         result = builder.compute_priority_values(_sample_pri(), _sample_df(), "schema")
         values = result["priorities"]["Growth"]["values"]
-        assert values["Growth"]["status"] == "not_computable"
+        skipped = result["priorities"]["Growth"]["skipped"]
+        assert "Growth" not in values
+        assert skipped["Growth"]["reason"]
 
     def test_compute_script_failure_is_error(self, monkeypatch):
         calls = iter([_period(), _specs(), _specs()])
@@ -978,8 +987,10 @@ class TestComputePriorityValues:
         monkeypatch.setattr(builder.sandbox, "execute_code", lambda *a, **k: (False, "boom: simulated sandbox failure"))
         result = builder.compute_priority_values(_sample_pri(), _sample_df(), "schema")
         values = result["priorities"]["Growth"]["values"]
-        assert values["Growth"]["status"] == "error"
-        assert values["Deal Count"]["status"] == "error"
+        skipped = result["priorities"]["Growth"]["skipped"]
+        assert "Growth" not in values
+        assert skipped["Growth"]["status"] == "error"
+        assert skipped["Deal Count"]["status"] == "error"
 
 
 def _run(specs, df=_group_df(), period=_period()):
@@ -1329,7 +1340,7 @@ class TestEngineVersion:
         shell.project = _FakeProject(stored)
         captured = {}
 
-        def fake_compute(pri, df, schema_str, existing=None, on_progress=None, period=None):
+        def fake_compute(pri, df, schema_str, existing=None, existing_skipped=None, on_progress=None, period=None):
             captured["existing"] = existing
             return {
                 "generated_at": "t",
@@ -1373,7 +1384,7 @@ class TestEngineVersion:
         shell.project = _FakeProject(stored)
         captured = {}
 
-        def fake_compute(pri, df, schema_str, existing=None, on_progress=None, period=None):
+        def fake_compute(pri, df, schema_str, existing=None, existing_skipped=None, on_progress=None, period=None):
             captured["existing"] = existing
             return {
                 "generated_at": "t",

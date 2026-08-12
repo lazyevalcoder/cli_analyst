@@ -7,7 +7,7 @@ from pathlib import Path
 
 from src.analyst import agent, builder, llm, viewer
 from src.analyst.config import CONFIG
-from src.analyst.constants import STATUS_COMPUTED, STATUS_NOT_COMPUTABLE
+from src.analyst.constants import STATUS_COMPUTED
 from src.analyst.graph import KnowledgeGraph, slugify
 from src.analyst.storage import append_jsonl, read_jsonl
 
@@ -378,7 +378,7 @@ class AnalystShell(cmd.Cmd):
         # Proactive: identify strategic priorities
         print("\n  Identifying strategic priorities...", end="", flush=True)
         try:
-            framework = builder.identify_priorities(schema_str, self.project.structural_kg, self.project.diagnostic_kg)
+            framework = builder.identify_priorities(schema_str, self.project.structural_kg, self.project.diagnostic_kg, df=self.df)
             priorities = framework.get("priorities", [])
             if priorities:
                 self.project.priorities = priorities
@@ -387,6 +387,12 @@ class AnalystShell(cmd.Cmd):
                 self._catalog.save(self.project.metric_catalog_path)
                 self._build_unified_graph()
                 print(" done")
+                excluded = framework.get("excluded_metrics", [])
+                if excluded:
+                    print("\n  Excluded metrics (failed the computability contract even after repair):")
+                    for em in excluded:
+                        print(f"    [{em.get('priority', '?')}] {em.get('name', '?')}: {em.get('reason', '')}")
+                    print()
                 print("\n  Strategic Priorities identified:")
                 for i, p in enumerate(priorities, 1):
                     print(f"    {i}. {p.get('name', '?')} — {p.get('description', '')}")
@@ -591,6 +597,9 @@ class AnalystShell(cmd.Cmd):
         )
         if base_current and rec is not None:
             existing = rec.get("values") or {}
+            existing_skipped = rec.get("skipped") or {}
+        else:
+            existing_skipped = None
 
         def persist(result: dict):
             merged = dict(self.project.priority_values or {})
@@ -603,11 +612,19 @@ class AnalystShell(cmd.Cmd):
             self.project.priority_values = merged
             self.project.save()
 
-        result = builder.compute_priority_values(pri, self.df, schema_str, existing=existing, on_progress=persist, period=period)
+        result = builder.compute_priority_values(
+            pri,
+            self.df,
+            schema_str,
+            existing=existing,
+            existing_skipped=existing_skipped,
+            on_progress=persist,
+            period=period,
+        )
         persist(result)
         prec = result["priorities"].get(pname, {})
         self._ensure_breakdowns(pri, prec)
-        print(f"  Stored {len(prec.get('values', {}))} metric values.")
+        print(f"  Stored {len(prec.get('values', {}))} computed value(s); {len(prec.get('skipped', {}))} skipped.")
         return prec
 
     def _print_priority_values(self, pri: dict):
@@ -616,10 +633,13 @@ class AnalystShell(cmd.Cmd):
             print("  No stored values. Use 'priorities compute <n>'.")
             return
         values = rec.get("values", {})
+        skipped = rec.get("skipped", {}) or {}
         period = (self.project.priority_values or {}).get("period_definition", "")
         print(f"\n  Stored values for [{pri.get('name', '')}]:")
         if period:
             print(f"  Period: {period}")
+        if not values and not skipped:
+            print("  (no metric values computed)")
         for mname, v in values.items():
             value = v.get("value")
             unit = v.get("unit", "")
@@ -633,7 +653,31 @@ class AnalystShell(cmd.Cmd):
                 print(f"      basis: {basis}")
             if reason:
                 print(f"      reason: {reason}")
+        if skipped:
+            print(f"\n  Skipped ({len(skipped)} not computable — use 'priorities skipped' for details):")
+            for mname, s in skipped.items():
+                print(f"    {mname}: {builder.friendly_reason(s.get('reason', ''))}")
         self._print_breakdown_matrix(rec)
+
+    def _print_priority_skipped(self, pri: dict):
+        """Compact skipping list: name + reason, no cluttered value records."""
+        rec = self._priority_values_record(pri)
+        if rec is None:
+            print("  No stored values. Use 'priorities compute <n>' first.")
+            return
+        skipped = rec.get("skipped", {}) or {}
+        if not skipped:
+            print(f"  No skipped metrics for [{pri.get('name', '')}].")
+            return
+        print(f"\n  Skipped metrics for [{pri.get('name', '')}] ({len(skipped)}):")
+        for mname, s in skipped.items():
+            reason = s.get("reason", "")
+            prim = s.get("missing_primitive")
+            print(f"    - {mname}")
+            print(f"        reason: {builder.friendly_reason(reason)}")
+            if prim:
+                print(f"        needs primitive: {prim}")
+        print("  These metrics are honestly not computed — no substituted values.\n")
 
     def _print_breakdown_matrix(self, rec: dict) -> None:
         """Print the metrics-in-rows x members-in-columns breakdown table per dimension."""
@@ -716,6 +760,7 @@ class AnalystShell(cmd.Cmd):
           priorities verify <n>                Plausibility + re-derivation + LLM semantic check
           priorities interpret <n>             Quick one-call narration of stored values
           priorities values <n>                Print stored computed values (audit aid)
+          priorities skipped <n>               Print metrics that could not be computed (no clutter)
           priorities show <n>                  Show executive questions, KPIs, metrics for priority #n
         """
         parts = arg.strip().split(maxsplit=1)
@@ -739,7 +784,7 @@ class AnalystShell(cmd.Cmd):
             print("  Regenerating strategic priorities...", end="", flush=True)
             try:
                 framework = builder.identify_priorities(
-                    schema_str, self.project.structural_kg, self.project.diagnostic_kg, period=period
+                    schema_str, self.project.structural_kg, self.project.diagnostic_kg, period=period, df=self.df
                 )
                 priorities = framework.get("priorities", [])
                 if priorities:
@@ -748,6 +793,7 @@ class AnalystShell(cmd.Cmd):
                         "domain": framework.get("domain", ""),
                         "health_indicators": framework.get("health_indicators", []),
                         "period": period,
+                        "excluded_metrics": framework.get("excluded_metrics", []),
                     }
                     self.project.priority_values = {}
                     self.project.save()
@@ -755,6 +801,12 @@ class AnalystShell(cmd.Cmd):
                     self._catalog.save(self.project.metric_catalog_path)
                     self._build_unified_graph()
                     print(" done")
+                    excluded = framework.get("excluded_metrics", [])
+                    if excluded:
+                        print("\n  Excluded metrics (failed the computability contract even after repair):")
+                        for ex in excluded:
+                            print(f"    [{ex.get('priority', '?')}] {ex.get('name', '?')}: {ex.get('reason', '')}")
+                        print()
                     warnings = builder.scan_priority_viability(priorities, period, self.df)
                     if warnings:
                         print("\n  Viability scan (deterministic, pre-compute):")
@@ -980,6 +1032,27 @@ class AnalystShell(cmd.Cmd):
             return
 
         # ----
+        # skipped <n>
+        # ----
+        if sub == "skipped":
+            if not self.project.priorities:
+                print("  No priorities defined.")
+                return
+            if len(parts) < 2:
+                print("  Usage: priorities skipped <number>")
+                return
+            try:
+                idx = int(parts[1]) - 1
+                if idx < 0 or idx >= len(self.project.priorities):
+                    print(f"  Invalid index. Use a number 1-{len(self.project.priorities)}.")
+                    return
+            except ValueError:
+                print("  Usage: priorities skipped <number>")
+                return
+            self._print_priority_skipped(self.project.priorities[idx])
+            return
+
+        # ----
         # show <n>
         # ----
         if sub == "show":
@@ -1122,17 +1195,23 @@ class AnalystShell(cmd.Cmd):
             if rec:
                 period = (self.project.priority_values or {}).get("period_definition", "")
                 values = rec.get("values", {})
+                skipped = rec.get("skipped", {}) or {}
                 print("\n  Computed values:")
                 if period:
                     print(f"    Period: {period}")
                 for mname, v in values.items():
                     status = v.get("status", "")
                     verified = "verified" if v.get("verified") else "UNVERIFIED"
-                    if status == STATUS_NOT_COMPUTABLE:
-                        reason = v.get("reason_display") or builder.friendly_reason(v.get("reason", ""))
-                        print(f"    {mname}: NOT COMPUTED — {reason}")
-                    else:
-                        print(f"    {mname}: {v.get('value')} {v.get('unit', '')} [{status} | {verified}]".rstrip())
+                    print(f"    {mname}: {v.get('value')} {v.get('unit', '')} [{status} | {verified}]".rstrip())
+                if skipped:
+                    print("\n  Skipped (not computable):")
+                    for mname, s in skipped.items():
+                        reason = s.get("reason", "")
+                        print(
+                            f"    {mname}: {builder.friendly_reason(reason)}"
+                            f"{' [needs: ' + s['missing_primitive'] + ']' if s.get('missing_primitive') else ''}"
+                        )
+                    print("    (Use 'priorities skipped <n>' for the full list.)")
 
             interp = pri.get("interpretation_summary", "")
             if interp:

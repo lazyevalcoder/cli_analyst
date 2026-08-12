@@ -220,7 +220,9 @@ class TestDegenerateBreakdownsSkipped:
         assert builder._breakdown_degenerate_for_dim(spec, "region") is False
 
     def test_group_share_and_topk_share_degenerate(self):
-        group_share = {"steps": [{"op": "group", "group_by": "segment", "inner_agg": "share", "value": "sales", "outer_agg": "max"}]}
+        group_share = {
+            "steps": [{"op": "group", "group_by": "segment", "inner_agg": "share", "value": "sales", "outer_agg": "max"}]
+        }
         topk = {"agg": "topk_share", "group_by": "segment", "k": 1}
         assert builder._breakdown_degenerate_for_dim(group_share, "segment") is True
         assert builder._breakdown_degenerate_for_dim(topk, "segment") is True

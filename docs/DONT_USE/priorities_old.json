@@ -1,0 +1,133 @@
+[
+  {
+    "name": "Maximize profitable revenue growth",
+    "description": "Drive top-line sales expansion while protecting and expanding net margins across all channels and regions.",
+    "executive_questions": [
+      "Is revenue growth being fueled by volume, price, or mix, and is it sustainable?",
+      "Where are margin leaks occurring across product categories and fulfillment channels?",
+      "Are we prioritizing high-value customers and segments effectively?"
+    ],
+    "kpis": [
+      {
+        "name": "Net Revenue Growth Rate",
+        "metric": "Sales",
+        "description": "Measures the period-over-period change in total sales revenue, indicating top-line momentum.",
+        "measurement": "Percentage change in sum(Sales) compared to the prior equivalent period (MoM or QoQ).",
+        "operational_metrics": [
+          {
+            "name": "Order Volume Growth Rate",
+            "metric": "Order ID",
+            "description": "Tracks the change in transaction count, isolating demand velocity from price effects.",
+            "measurement": "Percentage change in count_distinct(Order ID) compared to the prior equivalent period."
+          },
+          {
+            "name": "Average Order Value Growth Rate",
+            "metric": "Sales",
+            "description": "Measures the change in average revenue per order, indicating basket size or pricing shifts.",
+            "measurement": "Percentage change in mean(Sales) / count_distinct(Order ID) compared to the prior equivalent period."
+          }
+        ],
+        "analytical_lenses": [
+          "Trends",
+          "Mix shift"
+        ]
+      },
+      {
+        "name": "Net Profit Margin Expansion",
+        "metric": "Profit",
+        "description": "Tracks the period-over-period change in net profitability relative to sales, highlighting margin health.",
+        "measurement": "Percentage change in (sum(Profit) / sum(Sales)) compared to the prior equivalent period.",
+        "operational_metrics": [
+          {
+            "name": "Discount Rate Change",
+            "metric": "Discount",
+            "description": "Measures the shift in average discounting, revealing pricing pressure or promotional intensity.",
+            "measurement": "Percentage change in mean(Discount) compared to the prior equivalent period."
+          },
+          {
+            "name": "Shipping Cost Ratio Change",
+            "metric": "Shipping Cost",
+            "description": "Tracks the shift in logistics cost burden relative to sales, indicating fulfillment efficiency.",
+            "measurement": "Percentage change in (sum(Shipping Cost) / sum(Sales)) compared to the prior equivalent period."
+          }
+        ],
+        "analytical_lenses": [
+          "Composition",
+          "Elasticity"
+        ]
+      }
+    ],
+    "interpretation_summary": "**Net Revenue Growth Rate**\nNet revenue grew 48.7% in Q4-2013, driven by a jump from $723K to $1.07M. This strong top-line expansion is a positive signal, though it is entirely fueled by higher pricing rather than customer acquisition. Growth is led by the East region (+111.1%), which significantly outperformed the aggregate, while the West region lagged at +17.2%. All regions posted positive revenue growth, confirming broad-based sales strength.\n\n**Order Volume Growth Rate**\nOrder volume declined 9.6% in Q4-2013, dropping from 570 to 515 distinct orders. This contraction is a negative indicator, suggesting the revenue surge is not being supported by increased transaction frequency. The East region experienced the steepest drop (-23.0%), followed by the South (-15.1%), while the West region remained essentially flat (+0.8%). This volume pullback warrants monitoring to ensure it does not erode long-term market share.\n\n**Average Order Value Growth Rate**\nAverage order value surged 82.0% in Q4-2013, rising from $1.59 to $2.90 per transaction. This is a highly positive development, directly explaining the revenue growth despite falling order counts. The East region drove the majority of this uplift (+233.0%), far exceeding the overall average, while the West region showed the most modest gain (+20.2%). The data confirms a successful shift toward higher-value transactions across all regions.\n\n**Net Profit Margin Expansion**\nNet profit margin expanded 12.5% in Q4-2013, moving from 17.0% to 19.1%. This is a positive outcome, indicating that the company is successfully protecting profitability while scaling sales. However, performance is highly uneven by region: the Central region saw massive margin improvement (+134.9%), whereas the South region experienced a severe contraction (-67.7%). Leadership should investigate the South's margin compression to prevent it from dragging down overall profitability.\n\n**Discount Rate Change**\nThe average discount rate increased 2.1% in Q4-2013, rising from 4.84% to 4.94%. This is a neutral-to-slightly-negative signal, as deeper discounting can compress margins if not offset by volume or pricing power. The South region drove the increase (+13.2%), while the East and West regions actually reduced their discounting (-5.3% and -2.4%, respectively). The overall slight uptick should be monitored to ensure it does not undermine the margin expansion goal.\n\n**Shipping Cost Ratio Change**\nThe shipping cost ratio decreased 36.4% in Q4-2013, falling from 1.43% to 0.91% of sales. This is a strongly positive development, directly contributing to the net margin expansion. All regions achieved significant reductions, with the East region leading the efficiency gains (-51.3%) and the West region showing the smallest improvement (-17.2%). These logistics efficiencies are a key driver of the priority's success and should be scaled.",
+    "interpreted_at": "2026-08-02T23:58:18"
+  },
+  {
+    "name": "Optimize customer segment targeting",
+    "description": "Ensure sales efforts and product assortments are aligned with the purchasing behavior and profitability of key customer segments.",
+    "executive_questions": [
+      "Which customer segments are driving profitable growth versus draining resources?",
+      "Are we over-indexing on low-margin segments or under-serving high-potential ones?",
+      "How does segment performance vary across geographic markets?"
+    ],
+    "kpis": [
+      {
+        "name": "Segment Revenue Share Shift",
+        "metric": "Customer Segment",
+        "description": "Measures the period-over-period change in revenue concentration across customer segments.",
+        "measurement": "Percentage point change in share of sum(Sales) for the top segment compared to the prior equivalent period.",
+        "operational_metrics": [
+          {
+            "name": "Segment Profitability Delta",
+            "metric": "Profit",
+            "description": "Tracks the change in net profit contribution by segment, isolating margin performance.",
+            "measurement": "Percentage change in sum(Profit) / sum(Sales) for the target segment compared to the prior equivalent period."
+          },
+          {
+            "name": "Segment Order Frequency Change",
+            "metric": "Order ID",
+            "description": "Measures the shift in repeat purchase behavior within the segment.",
+            "measurement": "Percentage change in count_distinct(Order ID) / count_distinct(Customer ID) for the segment compared to the prior equivalent period."
+          }
+        ],
+        "analytical_lenses": [
+          "Cohorts",
+          "Mix shift"
+        ]
+      }
+    ]
+  },
+  {
+    "name": "Streamline fulfillment and logistics efficiency",
+    "description": "Reduce delivery lead times and shipping cost variances while maintaining service levels across regions.",
+    "executive_questions": [
+      "Which ship modes and regions are driving disproportionate logistics costs?",
+      "Are delivery times aligning with customer expectations and order priorities?",
+      "Where are fulfillment bottlenecks causing margin erosion?"
+    ],
+    "kpis": [
+      {
+        "name": "Fulfillment Cost Efficiency Rate",
+        "metric": "Shipping Cost",
+        "description": "Measures the period-over-period change in shipping cost per unit sold, indicating logistics optimization.",
+        "measurement": "Percentage change in mean(Shipping Cost) / mean(Quantity ordered new) compared to the prior equivalent period.",
+        "operational_metrics": [
+          {
+            "name": "Express Ship Mode Adoption Rate",
+            "metric": "Ship Mode",
+            "description": "Tracks the shift in high-cost express shipping usage, revealing service level trade-offs.",
+            "measurement": "Percentage change in share of orders using 'Express Air' compared to the prior equivalent period."
+          },
+          {
+            "name": "Order-to-Ship Cycle Time Change",
+            "metric": "Order Date",
+            "description": "Measures the shift in average days between order placement and shipment, indicating fulfillment speed.",
+            "measurement": "Percentage change in mean(difference between Ship Date and Order Date) compared to the prior equivalent period."
+          }
+        ],
+        "analytical_lenses": [
+          "Velocity",
+          "Trends"
+        ]
+      }
+    ]
+  }
+]

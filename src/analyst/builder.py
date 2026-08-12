@@ -19,6 +19,8 @@ from src.analyst.constants import (
     DERIVE_OPS,
     INNER_AGGS,
     OUTER_AGGS,
+    PRIORITY_FORMS,
+    PRIORITY_UNITS,
     STATUS_COMPUTED,
     STATUS_ERROR,
     STATUS_NOT_COMPUTABLE,
@@ -208,23 +210,264 @@ def get_full_reasoning_framework(schema: str, structural_kg: dict, diagnostic_kg
     return f"{generic_framework}\n\n{context_text}"
 
 
-def identify_priorities(schema: str, structural_kg: dict, diagnostic_kg: dict, period: dict | None = None) -> dict:
-    """Generate the strategic priority framework from schema + KGs.
-
-    `period` (the resolved anchoring period) is rendered into the prompt so every
-    delta metric is anchored to the SAME time column and windows the compute stage
-    will use. Returns a dict with `domain`, `health_indicators`, and `priorities`
-    (the new outcome → executive questions → KPIs → operational metrics → lenses model).
-    """
+def _anchor_columns(period: dict | None) -> tuple[str, str]:
+    """Resolve the anchor column + period definition text for a prompt render."""
     anchor_column = None
     period_definition = None
     if isinstance(period, dict):
         anchor_column = period.get("date_column")
         period_definition = period.get("definition_text")
     if not anchor_column:
-        anchor_column = "none detected — treat the dataset as a single snapshot (LEVEL metrics only) unless a time column is resolved later"
+        anchor_column = (
+            "none detected — treat the dataset as a single snapshot (LEVEL metrics only) unless a time column is resolved later"
+        )
     if not period_definition:
         period_definition = "not resolved yet"
+    return anchor_column, period_definition
+
+
+def build_priority_blueprint(
+    schema: str,
+    structural_kg: dict,
+    diagnostic_kg: dict,
+    period: dict | None = None,
+    df: pd.DataFrame | None = None,
+) -> dict:
+    """Pass 1 of two-pass generation: the dataset-specific computability blueprint.
+
+    The LLM maps the schema into a domain, a value chain, and *measure candidates*,
+    each bound to an exact column + form + compare + baseline proof. Candidates are
+    then filtered deterministically through the same data gates `compute_priority_values`
+    uses (`_precheck_measurement` + column membership) so only provably computable
+    measures reach the authoring pass. Returns ``{"domain", "value_chain",
+    "measure_candidates", "excluded"}`` — ``excluded`` carries the LLM-dropped or
+    data-gated candidates with reasons (surfaced as warnings, never persisted as metrics).
+    """
+    anchor_column, period_definition = _anchor_columns(period)
+    prompt = prompts.render(
+        "blueprint_prompt.md",
+        schema=schema,
+        structural_kg=str(structural_kg),
+        diagnostic_kg=str(diagnostic_kg),
+        anchor_column=anchor_column,
+        period_definition=period_definition,
+    )
+    raw = llm.ask_json(
+        prompt,
+        system_context="You are a strategy consultant. Return only valid JSON.",
+        label="Building computability blueprint",
+    )
+    if not isinstance(raw, dict):
+        return {"domain": "", "value_chain": [], "measure_candidates": [], "excluded": []}
+
+    domain = raw.get("domain", "")
+    value_chain = raw.get("value_chain", []) if isinstance(raw.get("value_chain"), list) else []
+    candidates = raw.get("measure_candidates", []) if isinstance(raw.get("measure_candidates"), list) else []
+
+    kept: list[dict] = []
+    excluded: list[dict] = []
+    columns = set(str(c) for c in df.columns) if df is not None else None
+    period = period or {}
+    for cand in candidates:
+        if not isinstance(cand, dict):
+            continue
+        name = cand.get("name")
+        col = cand.get("column")
+        if not name or not col:
+            excluded.append({"name": str(name), "reason": "missing name or column"})
+            continue
+        if columns is not None and str(col) not in columns:
+            excluded.append({"name": str(name), "reason": f"column '{col}' not in the schema"})
+            continue
+        if df is not None:
+            reason, _ = _precheck_measurement(str(cand.get("measurement", "")), period, df)
+            if reason:
+                excluded.append({"name": str(name), "reason": reason})
+                continue
+        kept.append(cand)
+
+    return {"domain": domain, "value_chain": value_chain, "measure_candidates": kept, "excluded": excluded}
+
+
+def _format_blueprint_block(blueprint: dict) -> str:
+    """Render the blueprint's computable candidates as a compact allow-list block for
+    the authoring prompt. Empty when pass 1 failed — authoring then falls back to the
+    five-tests gate in the main prompt."""
+    candidates = blueprint.get("measure_candidates") or []
+    if not candidates:
+        return "No computable measure candidates were pre-approved. Apply the COMPUTABILITY GATE strictly — propose only metrics the schema can provably compute."
+    lines = [
+        "COMPUTABILITY BLUEPRINT — pre-approved, schema-grounded measure candidates. "
+        "Every KPI and operational metric MUST be drawn from this list by name — you may "
+        "NOT invent a metric, column, form, or comparison outside it.",
+        "",
+        "CONSTRAINED MEASURE CANDIDATES (pick ONLY from these):",
+    ]
+    for c in candidates:
+        lines.append(
+            f"- {c.get('name', '?')} | column: {c.get('column', '?')} | form: {c.get('form', '?')} | "
+            f"compare: {c.get('compare', '?')}"
+        )
+        lines.append(f"    measurement: {c.get('measurement', '')}")
+        lines.append(f"    baseline: {c.get('baseline_proof', '')}")
+        if c.get("why"):
+            lines.append(f"    why computable: {c.get('why', '')}")
+    lines.append("")
+    lines.append(
+        "If the intent of an outcome needs a measure NOT in the list, you must redefine "
+        "the outcome's KPI to one that IS in the list (or drop it) — never emit an "
+        "out-of-list metric. The comparison basis must match the candidate's `compare`."
+    )
+    return "\n".join(lines)
+
+
+def validate_priority_metrics(
+    priorities: list,
+    period: dict,
+    df: pd.DataFrame | None = None,
+) -> list[tuple[str, str, str]]:
+    """Deterministic pre-authoring contract check on every KPI + operational metric.
+
+    Reuses the exact gates compute uses: schema column membership, `form` / `compare` /
+    `unit` enums, and the `_precheck_measurement` data gate (baseline/anchor). Returns
+    ``(priority_name, metric_name, reason)`` for each violation — the doomed metrics are
+    caught here, in the plan phase, not at compute. No LLM involved.
+
+    With ``df=None`` the data gate is skipped (no rows to check against), but the schema
+    and enum checks still run.
+    """
+    columns = set(str(c) for c in df.columns) if df is not None else None
+    failures: list[tuple[str, str, str]] = []
+    for pri in priorities or []:
+        if not isinstance(pri, dict):
+            continue
+        pname = str(pri.get("name", "?"))
+        for _, metric in _iter_priority_metrics(pri):
+            mname = str(metric.get("name", ""))
+            if not mname:
+                continue
+            col = metric.get("metric")
+            if not col:
+                failures.append((pname, mname, "missing the 'metric' column field"))
+                continue
+            if columns is not None and str(col) not in columns:
+                failures.append((pname, mname, f"column '{col}' not in the schema"))
+                continue
+            if metric.get("form") not in PRIORITY_FORMS:
+                failures.append((pname, mname, f"unknown form '{metric.get('form')}'"))
+                continue
+            if metric.get("compare") not in COMPARES:
+                failures.append((pname, mname, f"unknown compare '{metric.get('compare')}'"))
+                continue
+            if metric.get("unit") not in PRIORITY_UNITS:
+                failures.append((pname, mname, f"unknown unit '{metric.get('unit')}'"))
+                continue
+            if df is not None:
+                reason, _prim = _precheck_measurement(str(metric.get("measurement", "")), period or {}, df)
+                if reason:
+                    failures.append((pname, mname, reason))
+    return failures
+
+
+def _drop_priority_metric(priorities: list, pname: str, mname: str) -> bool:
+    """Remove a metric (KPI or operational) named ``mname`` from the priority named
+    ``pname`` across all three priority shapes. Mutates in place; returns True if removed."""
+    removed = False
+    for pri in priorities or []:
+        if not isinstance(pri, dict) or pri.get("name") != pname:
+            continue
+
+        kpis = pri.get("kpis")
+        if kpis and isinstance(kpis, list):
+            new_kpis: list = []
+            for k in kpis:
+                if not isinstance(k, dict):
+                    continue
+                if k.get("name") == mname:
+                    removed = True
+                    continue
+                ops = k.get("operational_metrics")
+                if isinstance(ops, list):
+                    new_ops = [o for o in ops if not (isinstance(o, dict) and o.get("name") == mname)]
+                    if len(new_ops) != len(ops):
+                        removed = True
+                    if new_ops:
+                        k["operational_metrics"] = new_ops
+                    else:
+                        k.pop("operational_metrics", None)
+                new_kpis.append(k)
+            pri["kpis"] = new_kpis
+
+        eqs = pri.get("executive_questions")
+        if eqs and isinstance(eqs, list) and eqs and isinstance(eqs[0], dict):
+            for eq in eqs:
+                if not isinstance(eq, dict):
+                    continue
+                e_kpis = eq.get("kpis")
+                if e_kpis and isinstance(e_kpis, list):
+                    new_e = [k for k in e_kpis if not (isinstance(k, dict) and k.get("name") == mname)]
+                    if len(new_e) != len(e_kpis):
+                        removed = True
+                    eq["kpis"] = new_e
+                supports = eq.get("supporting_metrics")
+                if supports and isinstance(supports, list):
+                    new_s = [x for x in supports if not (isinstance(x, dict) and x.get("name") == mname)]
+                    if len(new_s) != len(supports):
+                        removed = True
+                    eq["supporting_metrics"] = new_s
+
+        supports = pri.get("supporting_metrics")
+        if supports and isinstance(supports, list):
+            new_s = [x for x in supports if not (isinstance(x, dict) and x.get("name") == mname)]
+            if len(new_s) != len(supports):
+                removed = True
+            pri["supporting_metrics"] = new_s
+    return removed
+
+
+def _render_repair_block(failures: list[tuple[str, str, str]]) -> str:
+    """Append-only repair instruction listing the contract violations for a repair pass."""
+    lines = [
+        "",
+        "=== REPAIR PASS (deterministic contract) ===",
+        "The metrics below fail the computability contract and MUST be corrected:",
+        "",
+    ]
+    for pname, mname, reason in failures:
+        lines.append(f"- [{pname}] {mname}: {reason}")
+    lines.extend(
+        [
+            "",
+            "Re-emit the ENTIRE JSON framework with every metric above fixed: redefine its "
+            "`metric` / `form` / `compare` / `unit` / `measurement` to a passing form (e.g. a "
+            "delta without a provable prior baseline becomes a `level` snapshot) or REMOVE the "
+            "metric. Never re-emit a failing metric unchanged. Return ONLY the corrected JSON object.",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def identify_priorities(
+    schema: str,
+    structural_kg: dict,
+    diagnostic_kg: dict,
+    period: dict | None = None,
+    df: pd.DataFrame | None = None,
+) -> dict:
+    """Generate the strategic priority framework from schema + KGs (two-pass).
+
+    Pass 1 (`build_priority_blueprint`) maps the schema to provably computable measure
+    candidates. Pass 2 authors the framework constrained to that blueprint, so it never
+    invents a domain or a non-computable metric. The authored output is then run through
+    the deterministic contract (`validate_priority_metrics`) — reusing the same gates
+    compute uses; a failing draft triggers ONE repair pass, and metrics still failing are
+    excluded (never persisted as a metric). Returns a dict with `domain`,
+    `health_indicators`, `priorities` (outcome → executive questions → KPIs →
+    operational metrics → lenses model), and `excluded_metrics` (dropped metrics +
+    reasons, surfaced to the user, not persisted as metrics).
+    """
+    anchor_column, period_definition = _anchor_columns(period)
+    blueprint = build_priority_blueprint(schema, structural_kg, diagnostic_kg, period=period, df=df)
     prompt = prompts.render(
         "priorities_prompt.md",
         schema=schema,
@@ -232,15 +475,41 @@ def identify_priorities(schema: str, structural_kg: dict, diagnostic_kg: dict, p
         diagnostic_kg=str(diagnostic_kg),
         anchor_column=anchor_column,
         period_definition=period_definition,
+        blueprint=_format_blueprint_block(blueprint),
     )
     raw = llm.ask_json(prompt, system_context="You are a strategy consultant. Return only valid JSON.")
     if not isinstance(raw, dict):
-        return {"domain": "", "health_indicators": [], "priorities": []}
+        return {"domain": "", "health_indicators": [], "priorities": [], "excluded_metrics": []}
     priorities = raw.get("priorities", []) if isinstance(raw.get("priorities"), list) else []
+    domain = raw.get("domain", "")
+    health_indicators = raw.get("health_indicators", []) if isinstance(raw.get("health_indicators"), list) else []
+
+    excluded_metrics: list[dict] = []
+    if df is not None:
+        failures = validate_priority_metrics(priorities, period or {}, df)
+        if failures:
+            repair_prompt = prompt + _render_repair_block(failures)
+            repaired = llm.ask_json(
+                repair_prompt,
+                system_context="You are a strategy consultant. Return only valid JSON.",
+                label="Repairing non-computable metrics",
+            )
+            if isinstance(repaired, dict):
+                priorities = repaired.get("priorities", []) if isinstance(repaired.get("priorities"), list) else []
+                domain = repaired.get("domain", domain)
+                health_indicators = (
+                    repaired.get("health_indicators", []) if isinstance(repaired.get("health_indicators"), list) else []
+                )
+            failures = validate_priority_metrics(priorities, period or {}, df)
+            for pname, mname, reason in failures:
+                if _drop_priority_metric(priorities, pname, mname):
+                    excluded_metrics.append({"priority": pname, "name": mname, "reason": reason})
+
     return {
-        "domain": raw.get("domain", ""),
-        "health_indicators": raw.get("health_indicators", []) if isinstance(raw.get("health_indicators"), list) else [],
+        "domain": domain,
+        "health_indicators": health_indicators,
         "priorities": priorities,
+        "excluded_metrics": excluded_metrics,
     }
 
 
@@ -594,7 +863,23 @@ def _parse_compute_output(output: str) -> dict:
         return {}
     if not isinstance(data, dict):
         return {}
-    return data
+    return _finite_nan(data)
+
+
+def _finite_nan(data: dict) -> dict:
+    """Recursively null out NaN/inf floats in a parsed compute dict so they never
+    persist to `priority_values.json` (and thus never reach the scorecard payload)."""
+    out: dict = {}
+    for key, value in data.items():
+        if isinstance(value, dict):
+            out[key] = _finite_nan(value)
+        elif isinstance(value, list):
+            out[key] = [_finite_nan(v) if isinstance(v, dict) else (None if isinstance(v, float) and not math.isfinite(v) else v) for v in value]
+        elif isinstance(value, float) and not math.isfinite(value):
+            out[key] = None
+        else:
+            out[key] = value
+    return out
 
 
 _BLOCKED_IN_CONDITION = ("import", "__", "open(", "exec(", "eval(", "compile(", "os.", "sys.")
@@ -964,7 +1249,10 @@ def _validate_spec(spec: dict, columns: set, batch_names: set | None = None) -> 
     # <dim>" spec collapses to whole-frame share (1.0) and the delta is always 0 —
     # reject instead of storing a guaranteed-garbage value.
     if spec.get("group_by") is not None and spec.get("agg") != "topk_share":
-        return False, "group_by is only valid for agg 'topk_share'; express a share-by-dimension metric as a scalar (top-segment share or a where-clause filtered aggregate)"
+        return (
+            False,
+            "group_by is only valid for agg 'topk_share'; express a share-by-dimension metric as a scalar (top-segment share or a where-clause filtered aggregate)",
+        )
 
     # ---- composition: input_ref ----
     ref = spec.get("input_ref")
@@ -1253,6 +1541,15 @@ def _computed_record(period: dict, measurement: str, value, unit: str, basis: st
         "verified": False,
         "status": STATUS_COMPUTED,
     }
+    return rec
+
+
+def _skip_record(reason: str, missing_prim: str | None = None, measurement: str = "") -> dict:
+    """Build a compact skipped entry (the not_computable equivalent that is NOT
+    persisted as a value — surfaced via `priorities skipped <n>` instead)."""
+    rec = {"reason": reason, "missing_primitive": missing_prim or ""}
+    if measurement:
+        rec["measurement"] = measurement
     return rec
 
 
@@ -1594,6 +1891,7 @@ def compute_priority_values(
     df: pd.DataFrame,
     schema_str: str,
     existing: dict | None = None,
+    existing_skipped: dict | None = None,
     on_progress: Callable[..., None] | None = None,
     period: dict | None = None,
 ) -> dict:
@@ -1624,8 +1922,20 @@ def compute_priority_values(
 
     values: dict = {}
     for name, rec in (existing or {}).items():
-        if isinstance(rec, dict) and rec.get("status") in (STATUS_COMPUTED, STATUS_NOT_COMPUTABLE, STATUS_ERROR):
+        if isinstance(rec, dict) and rec.get("status") == STATUS_COMPUTED:
             values[name] = dict(rec)
+
+    skipped: dict = {}
+    for name, rec in (existing or {}).items():
+        if isinstance(rec, dict) and rec.get("status") not in (STATUS_COMPUTED,):
+            skipped[name] = _skip_record(str(rec.get("reason", "")), rec.get("missing_primitive"), str(rec.get("measurement", "")))
+    for name, rec in (existing_skipped or {}).items():
+        if isinstance(rec, dict):
+            skipped[name] = _skip_record(
+                str(rec.get("reason", "")),
+                rec.get("missing_primitive"),
+                str(rec.get("measurement", "")),
+            )
 
     reasons: dict = {}
     errored: set = set()
@@ -1633,11 +1943,11 @@ def compute_priority_values(
     prefiltered = {}
     for _, k in all_metrics:
         mname = str(k.get("name", ""))
-        if not mname or mname in values:
+        if not mname or mname in values or mname in skipped:
             continue
         reason, missing_prim = _precheck_measurement(k.get("measurement", ""), period, df)
         if reason:
-            values[mname] = _nc_record(period, k.get("measurement", ""), reason, missing_prim=missing_prim)
+            skipped[mname] = _skip_record(reason, missing_prim, str(k.get("measurement", "")))
             prefiltered[mname] = reason
 
     eqs = pri.get("executive_questions") or []
@@ -1686,13 +1996,14 @@ def compute_priority_values(
                     "fingerprint": priority_fingerprint(pri),
                     "engine_version": COMPUTE_ENGINE_VERSION,
                     "values": values,
+                    "skipped": skipped,
                 }
             },
         }
 
     for gi, group in enumerate(groups, 1):
         group_names = [str(k.get("name")) for k in group]
-        missing = [m for m in group_names if m not in values]
+        missing = [m for m in group_names if m not in values and m not in skipped]
         if not missing:
             continue
         base_metrics_json = json.dumps(
@@ -1734,13 +2045,13 @@ def compute_priority_values(
                     print(f"    {len(omitted)} metric(s) omitted this attempt; retrying in repair pass.", flush=True)
                 else:
                     for m in omitted:
-                        values[m] = _nc_record(
-                            period,
-                            measurements.get(m, ""),
+                        skipped[m] = _skip_record(
                             "LLM could not express this measurement as a scalar spec (omitted)",
+                            None,
+                            measurements.get(m, ""),
                         )
                         missing.remove(m)
-                    print(f"    {len(omitted)} metric(s) inexpressible as scalar specs; marked not_computable.", flush=True)
+                    print(f"    {len(omitted)} metric(s) inexpressible as scalar specs; skipped.", flush=True)
 
             valid = []
             for spec in specs:
@@ -1757,28 +2068,26 @@ def compute_priority_values(
                     print(f"    No valid specs this attempt; repairing {len(missing)} metric(s)...", flush=True)
                     continue
                 for m in missing:
-                    values[m] = _nc_record(
-                        period,
-                        measurements.get(m, ""),
-                        reasons.get(m, "no valid spec produced"),
-                    )
+                    skipped[m] = _skip_record(reasons.get(m, "no valid spec produced"), None, measurements.get(m, ""))
                 break
             valid, anchor_flagged = _anchor_preflight(valid, df, period)
             if anchor_flagged:
                 for m in sorted(anchor_flagged):
                     if m in missing:
-                        values[m] = _nc_record(period, measurements.get(m, ""), anchor_flagged[m])
+                        skipped[m] = _skip_record(anchor_flagged[m], None, measurements.get(m, ""))
                         missing.remove(m)
                         reasons.pop(m, None)
-                    print(f"    {m}: preflight shows 0 rows in BOTH current and prior windows — delta undefined; not computed.", flush=True)
+                    print(
+                        f"    {m}: preflight shows 0 rows in BOTH current and prior windows — delta undefined; skipped.", flush=True
+                    )
             if not valid:
                 if missing and attempt == 1:
                     continue
                 for m in missing:
-                    values[m] = _nc_record(
-                        period,
-                        measurements.get(m, ""),
+                    skipped[m] = _skip_record(
                         reasons.get(m, "no valid spec produced after anchor preflight"),
+                        None,
+                        measurements.get(m, ""),
                     )
                 break
             code = build_metric_script(valid, period)
@@ -1802,16 +2111,11 @@ def compute_priority_values(
                 is_custom = (spec_by_name.get(mname) or {}).get("kind") == "custom"
                 source = "custom" if is_custom else None
                 if isinstance(rec, dict) and rec.get("value") is None:
-                    values[mname] = _nc_record(
-                        period,
-                        k.get("measurement", ""),
+                    skipped[mname] = _skip_record(
                         rec.get("null_reason") or "template returned null (e.g. empty prior period / division by zero)",
-                        spec=dict(spec_by_name.get(mname) or {}),
-                        basis=str(rec.get("basis", "")),
-                        unit=str(rec.get("unit", "")),
+                        None,
+                        k.get("measurement", ""),
                     )
-                    if source:
-                        values[mname]["source"] = source
                     missing.remove(mname)
                     reasons.pop(mname, None)
                 elif (
@@ -1840,21 +2144,21 @@ def compute_priority_values(
 
     for _, k in all_metrics:
         mname = str(k.get("name", ""))
-        if mname in values:
+        if mname in values or mname in skipped:
             continue
         reason = reasons.get(mname, "no value produced")
-        values[mname] = _nc_record(period, k.get("measurement", ""), reason)
+        skipped[mname] = _skip_record(reason, None, k.get("measurement", ""))
         if mname in errored:
-            values[mname]["status"] = STATUS_ERROR
+            skipped[mname]["status"] = STATUS_ERROR
 
     computed = sum(1 for v in values.values() if v.get("status") == STATUS_COMPUTED)
-    failed = len(values) - computed
-    print(f"\n  Done: {computed} computed, {failed} not computable/errored.", flush=True)
+    failed = len(skipped)
+    print(f"\n  Done: {computed} computed, {failed} skipped (not computable).", flush=True)
     missing_prims = sorted(
         {
             str(v.get("missing_primitive"))
-            for v in values.values()
-            if v.get("status") == STATUS_NOT_COMPUTABLE and v.get("missing_primitive")
+            for v in skipped.values()
+            if (v.get("status") or STATUS_NOT_COMPUTABLE) == STATUS_NOT_COMPUTABLE and v.get("missing_primitive")
         }
     )
     if missing_prims:

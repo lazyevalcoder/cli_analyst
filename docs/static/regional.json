@@ -1,0 +1,212 @@
+{
+    "name": "Regional Scorecard (Orders)",
+    "description": "Standard regional scorecard matching the sample template. Tracks Revenue, GM%, Units, Buyers, and Products across regions.",
+    "group_by": "Region",
+    "rows": [
+        {
+            "section": "RUM",
+            "name": "Revenue CQ",
+            "data_column": "Sales",
+            "aggregation": "sum",
+            "formula": "",
+            "comparison": "",
+            "base_metric": ""
+        },
+        {
+            "section": "RUM",
+            "name": "Revenue Q/Q",
+            "data_column": "Sales",
+            "aggregation": "sum",
+            "formula": "",
+            "comparison": "Q/Q",
+            "base_metric": "Revenue CQ"
+        },
+        {
+            "section": "RUM",
+            "name": "Revenue Y/Y",
+            "data_column": "Sales",
+            "aggregation": "sum",
+            "formula": "",
+            "comparison": "Y/Y",
+            "base_metric": "Revenue CQ"
+        },
+        {
+            "section": "RUM",
+            "name": "GM% CQ",
+            "data_column": "Profit",
+            "aggregation": "custom",
+            "formula": "(subset['Profit'].sum() / subset['Sales'].sum() * 100) if subset['Sales'].sum() != 0 else 0",
+            "comparison": "",
+            "base_metric": ""
+        },
+        {
+            "section": "RUM",
+            "name": "GM% Q/Q (bps)",
+            "data_column": "Profit",
+            "aggregation": "custom",
+            "formula": "0",
+            "comparison": "Q/Q",
+            "base_metric": "GM% CQ"
+        },
+        {
+            "section": "RUM",
+            "name": "GM% Y/Y (bps)",
+            "data_column": "Profit",
+            "aggregation": "custom",
+            "formula": "0",
+            "comparison": "Y/Y",
+            "base_metric": "GM% CQ"
+        },
+        {
+            "section": "RUM",
+            "name": "Units CQ",
+            "data_column": "Quantity ordered new",
+            "aggregation": "sum",
+            "formula": "",
+            "comparison": "",
+            "base_metric": ""
+        },
+        {
+            "section": "RUM",
+            "name": "Units Q/Q",
+            "data_column": "Quantity ordered new",
+            "aggregation": "sum",
+            "formula": "",
+            "comparison": "Q/Q",
+            "base_metric": "Units CQ"
+        },
+        {
+            "section": "RUM",
+            "name": "Units Y/Y",
+            "data_column": "Quantity ordered new",
+            "aggregation": "sum",
+            "formula": "",
+            "comparison": "Y/Y",
+            "base_metric": "Units CQ"
+        },
+        {
+            "section": "Buyers",
+            "name": "Buyers CQ",
+            "data_column": "Customer ID",
+            "aggregation": "nunique",
+            "formula": "",
+            "comparison": "",
+            "base_metric": ""
+        },
+        {
+            "section": "Buyers",
+            "name": "Buyers Y/Y",
+            "data_column": "Customer ID",
+            "aggregation": "nunique",
+            "formula": "",
+            "comparison": "Y/Y",
+            "base_metric": "Buyers CQ"
+        },
+        {
+            "section": "Buyers",
+            "name": "Buyers Q/Q",
+            "data_column": "Customer ID",
+            "aggregation": "nunique",
+            "formula": "",
+            "comparison": "Q/Q",
+            "base_metric": "Buyers CQ"
+        },
+        {
+            "section": "Products",
+            "name": "Furniture Rev",
+            "data_column": "Sales",
+            "aggregation": "sum",
+            "formula": "",
+            "comparison": "",
+            "base_metric": "",
+            "product_filter": "Furniture"
+        },
+        {
+            "section": "Products",
+            "name": "Furniture Y/Y",
+            "data_column": "Sales",
+            "aggregation": "sum",
+            "formula": "",
+            "comparison": "Y/Y",
+            "base_metric": "Furniture Rev",
+            "product_filter": "Furniture"
+        },
+        {
+            "section": "Products",
+            "name": "Furniture GM%",
+            "data_column": "Profit",
+            "aggregation": "custom",
+            "formula": "(subset['Profit'].sum() / subset['Sales'].sum() * 100) if subset['Sales'].sum() != 0 else 0",
+            "comparison": "",
+            "base_metric": "",
+            "product_filter": "Furniture"
+        },
+        {
+            "section": "Products",
+            "name": "Office Supplies Rev",
+            "data_column": "Sales",
+            "aggregation": "sum",
+            "formula": "",
+            "comparison": "",
+            "base_metric": "",
+            "product_filter": "Office Supplies"
+        },
+        {
+            "section": "Products",
+            "name": "Office Supplies Y/Y",
+            "data_column": "Sales",
+            "aggregation": "sum",
+            "formula": "",
+            "comparison": "Y/Y",
+            "base_metric": "Office Supplies Rev",
+            "product_filter": "Office Supplies"
+        },
+        {
+            "section": "Products",
+            "name": "Office Supplies GM%",
+            "data_column": "Profit",
+            "aggregation": "custom",
+            "formula": "(subset['Profit'].sum() / subset['Sales'].sum() * 100) if subset['Sales'].sum() != 0 else 0",
+            "comparison": "",
+            "base_metric": "",
+            "product_filter": "Office Supplies"
+        },
+        {
+            "section": "Products",
+            "name": "Technology Rev",
+            "data_column": "Sales",
+            "aggregation": "sum",
+            "formula": "",
+            "comparison": "",
+            "base_metric": "",
+            "product_filter": "Technology"
+        },
+        {
+            "section": "Products",
+            "name": "Technology Y/Y",
+            "data_column": "Sales",
+            "aggregation": "sum",
+            "formula": "",
+            "comparison": "Y/Y",
+            "base_metric": "Technology Rev",
+            "product_filter": "Technology"
+        },
+        {
+            "section": "Products",
+            "name": "Technology GM%",
+            "data_column": "Profit",
+            "aggregation": "custom",
+            "formula": "(subset['Profit'].sum() / subset['Sales'].sum() * 100) if subset['Sales'].sum() != 0 else 0",
+            "comparison": "",
+            "base_metric": "",
+            "product_filter": "Technology"
+        }
+    ],
+    "columns": [
+        { "name": "Overall", "filter_value": "" },
+        { "name": "Central", "filter_value": "Central" },
+        { "name": "East", "filter_value": "East" },
+        { "name": "West", "filter_value": "West" },
+        { "name": "South", "filter_value": "South" }
+    ]
+}

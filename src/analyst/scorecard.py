@@ -15,6 +15,9 @@ in Python without a browser. No values are computed or mutated here.
 
 from __future__ import annotations
 
+import math
+from typing import Any
+
 from src.analyst.constants import (
     BREAKDOWN_AT,
     BREAKDOWN_COLUMN,
@@ -120,12 +123,19 @@ def _parse_record(rec) -> dict | None:
         return None
     return {
         STATUS: str(rec.get("status", "")),
-        VALUE: rec.get("value"),
+        VALUE: _finite(rec.get("value")),
         UNIT: str(rec.get("unit", "")),
         BASIS: str(rec.get("basis", "")),
         VERIFIED: bool(rec.get("verified", False)),
         REASON: str(rec.get("reason_display") or rec.get("reason", "")),
     }
+
+
+def _finite(value: Any) -> Any:
+    """Coerce floats to None when they are NaN/inf so the payload stays valid JSON."""
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
+    return value
 
 
 def _parse_breakdown_cells(cells) -> dict:
@@ -139,7 +149,7 @@ def _parse_breakdown_cells(cells) -> dict:
             continue
         out[member] = {
             STATUS: str(c.get("status", "")),
-            VALUE: c.get(BREAKDOWN_DELTA),
+            VALUE: _finite(c.get(BREAKDOWN_DELTA)),
             UNIT: str(c.get("unit", "")),
             BASIS: str(c.get("basis", "")),
             VERIFIED: bool(c.get("verified", False)),
