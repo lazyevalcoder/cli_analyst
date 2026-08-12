@@ -36,6 +36,8 @@ from src.analyst.models import iter_priority_metrics
 
 PRIORITY = "priority"
 DESCRIPTION = "description"
+EXECUTIVE_QUESTIONS = "executive_questions"
+MEASUREMENT = "measurement"
 DIMENSION = "dimension"
 COLUMNS = "columns"
 SECTIONS = "sections"
@@ -100,6 +102,7 @@ def _build_section(pname: str, rec: dict, pri_def: dict) -> dict:
         row: dict = {
             NAME: name,
             KIND: "kpi" if str(kind).lower() == "kpi" else "op",
+            MEASUREMENT: str(metric.get(MEASUREMENT, "")),
             UNIT: str(recv.get("unit", "")) if recv else "",
             OVERALL: _parse_record(recv),
         }
@@ -111,6 +114,7 @@ def _build_section(pname: str, rec: dict, pri_def: dict) -> dict:
     return {
         PRIORITY: pname,
         DESCRIPTION: str(pri_def.get("description", "")),
+        EXECUTIVE_QUESTIONS: [str(q) for q in (pri_def.get(EXECUTIVE_QUESTIONS) or [])],
         DIMENSION: dcol,
         COLUMNS: [OVERALL_LABEL, *members],
         ROWS: rows,

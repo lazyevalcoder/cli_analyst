@@ -10,7 +10,9 @@ from src.analyst.scorecard import (
     CELLS,
     COLUMNS,
     DIMENSION,
+    EXECUTIVE_QUESTIONS,
     KIND,
+    MEASUREMENT,
     NAME,
     OVERALL,
     PRIORITY,
@@ -160,6 +162,32 @@ class TestBuildScorecardPayload:
         payload = build_scorecard_payload("Acme", pv, priorities)
         rows = payload[SECTIONS][0][ROWS]
         assert [(r[NAME], r[KIND]) for r in rows] == [("Revenue Growth", "kpi"), ("Units Sold", "op")]
+
+    def test_row_carries_measurement_definition(self):
+        priorities, pv = _sample_project()
+        payload = build_scorecard_payload("Acme", pv, priorities)
+        rows = payload[SECTIONS][0][ROWS]
+        assert rows[0][MEASUREMENT] == "pct change in sum(Sales)"
+        assert rows[1][MEASUREMENT] == "sum(Quantity)"
+
+    def test_row_measurement_defaults_to_empty(self):
+        priorities, pv = _sample_project()
+        priorities[0]["kpis"][0].pop("measurement")
+        payload = build_scorecard_payload("Acme", pv, priorities)
+        row = payload[SECTIONS][0][ROWS][0]
+        assert row[MEASUREMENT] == ""
+
+    def test_section_exposes_executive_questions(self):
+        priorities, pv = _sample_project()
+        payload = build_scorecard_payload("Acme", pv, priorities)
+        section = payload[SECTIONS][0]
+        assert section[EXECUTIVE_QUESTIONS] == ["Q1?"]
+
+    def test_section_executive_questions_default_to_empty(self):
+        priorities, pv = _sample_project()
+        priorities[0].pop("executive_questions")
+        payload = build_scorecard_payload("Acme", pv, priorities)
+        assert payload[SECTIONS][0][EXECUTIVE_QUESTIONS] == []
 
     def test_overall_cell_parsed(self):
         priorities, pv = _sample_project()

@@ -24,6 +24,7 @@ th { background: #f7f8fa; font-weight: 600; color: #4a5568; font-size: 12px; }
 th:first-child, td:first-child { text-align: left; }
 td.metric { font-variant-numeric: tabular-nums; }
 td.metric .name { font-weight: 500; }
+td.metric .defn { font-size: 11px; color: #8a8f98; font-weight: 400; max-width: 380px; white-space: normal; }
 td.metric .basis { font-size: 11px; color: #a0a6ad; font-weight: 400; }
 tr.op td:first-child { padding-left: 30px; }
 tr.op td.metric .name { color: #555; font-weight: 400; }
@@ -94,9 +95,10 @@ function fmtCell(cell) {
   return '<span class="value ' + cls + '">' + txt + '</span>';
 }
 
-function cellTitle(cell) {
+function cellTitle(cell, measurement) {
   if (!cell) return '';
   const parts = [];
+  if (measurement) parts.push(measurement);
   if (cell.basis) parts.push(cell.basis);
   if (cell.reason) parts.push(cell.reason);
   return parts.join(' — ');
@@ -116,18 +118,22 @@ function render(data) {
     html += '<div class="section-header"><h2>' + (i + 1) + '. ' + esc(sec.priority) + '</h2>';
     if (sec.dimension) html += '<div class="dimension">Breakdown by ' + esc(sec.dimension) + '</div>';
     if (sec.description) html += '<div class="dimension" style="margin-top:4px;">' + esc(sec.description) + '</div>';
+    (sec.executive_questions || []).forEach(q => {
+      html += '<div class="dimension" style="margin-top:4px;">Q: ' + esc(q) + '</div>';
+    });
     html += '</div><div class="table-wrap"><table><thead><tr><th>Metric</th><th>Overall</th>';
     members.forEach(m => html += '<th>' + esc(m) + '</th>');
     html += '</tr></thead><tbody>';
     sec.rows.forEach(row => {
       html += '<tr class="' + row.kind + '">';
       html += '<td class="metric"><span class="name">' + esc(row.name) + '</span>';
+      if (row.measurement) html += '<div class="defn">' + esc(row.measurement) + '</div>';
       if (row.overall && row.overall.basis) html += '<div class="basis">' + esc(row.overall.basis) + '</div>';
       html += '</td>';
-      html += '<td title="' + esc(cellTitle(row.overall)) + '">' + fmtCell(row.overall) + '</td>';
+      html += '<td title="' + esc(cellTitle(row.overall, row.measurement)) + '">' + fmtCell(row.overall) + '</td>';
       members.forEach(m => {
         const cell = row.cells ? row.cells[m] : null;
-        html += '<td title="' + esc(cellTitle(cell)) + '">' + fmtCell(cell) + '</td>';
+        html += '<td title="' + esc(cellTitle(cell, row.measurement)) + '">' + fmtCell(cell) + '</td>';
       });
       html += '</tr>';
     });

@@ -18,49 +18,33 @@ We ship a read-only scorecard page (`/scorecard` via the local viewer) that rend
 - `—` cells carry an honest, tooltip-visible reason (e.g. "no prior-period baseline — prior value is 0") — this is the trust layer; BI tools do not do this.
 - Clean end-user surface: no schema/JSON/KG noise.
 
-## What can be improved (no LLM needed)
+## Design decisions (owner-confirmed 2026-08)
 
-| # | Gap | Fix |
-|---|---|---|
-| 1 | Every number has a `measurement` (definition) but it is not exposed. Tooltips show `basis` only. | Add `measurement` per metric → tooltip = definition + basis. Pure data plumbing. |
-| 2 | "What moved fastest / weakest cell" requires scanning the whole grid. | Deterministic per-section **callout line**: fastest driver + laggard (no LLM). |
-| 3 | The executives' questions are not shown even though they exist in `priorities.json`. | Render each priority's `executive_questions` under its section header — the matrix becomes an answering-board. |
-| 4 | Mixed units look inconsistent (percent vs `d` vs raw). | Normalize presentation: two buckets — fractional-change (percent/ratio/pp → `%`) vs raw (count/currency/days → value + unit). |
+- **Insight layer** = structured What→Why notes + a Summary tab (see Stage B). Not a random linear narrative.
+- **Dimension guardrail** applies to scorecard/breakdown columns: person/entity-level columns ineligible; prefer high-level controllable dimensions with ≤6 members (Region / Product Category / Segment / Ship Mode).
+- **Overall-row trend** committed: last-N-period series on the Overall row only (all rows exist, so no 2-point fabrication); member cells stay current/prior.
+- **Metric policy** — no single-dimension-member KPIs; no analyst-only statistical indices. Enforced in the O2 validator + blueprint pass; see `roadmap.md`.
+- **No health status**; **no charting** (2-period proof, deliberately not PowerBI).
 
-## Where the dynamic-insight layer goes
+## Staged plan (canonical)
 
-We are **not** traditional BI (Tableau/PowerBI). We hold only 2 points per metric (current/prior), so **no sparklines / trend charts** — a chart would be fabricated from nothing. Our moat is a **narrative over a provable grid**.
+**Stage A — data + rendering, no LLM, low risk**
+1. Tooltips = **definition + basis**: include `measurement` + `basis` + per-member `current`/`prior` in the payload.
+2. **Unit normalization**: fractional-change (percent/ratio/pp → `%`) vs raw (count/currency/days → value + unit).
+3. Show `executive_questions` under each section header — the matrix becomes an answering-board.
+4. Deterministic per-section **callout** line: fastest driver + laggard + missing-data count.
+5. **Dimension guardrail** — tighten `suggest_breakdown_dimensions` candidates (`builder.py`): drop person/entity-level columns; ≤6 members.
+6. **Overall-row trend** — last-N-period series from the full `df` for the Overall row only; skipped/inapplicable metrics collapse to a compact footnote instead of a row.
+7. **Headline strip** — deterministic one-line period summary (fastest mover / laggard), no LLM.
 
-Place insights in two tiers:
-
-**Stage B — cached narrative (reuses the existing `interpret_priority` LLM engine)**
-- A collapsible **"What the numbers say"** block directly under each section matrix:
-  1. deterministic first line (fastest mover / laggard — no LLM),
-  2. then a plain-language interpretation generated via the existing `interpret_priority` prompt.
-- **Cache per priority** in a small per-project file, invalidated by the same `generated_at`/fingerprint gate that already exists. Add a "refresh" affordance.
-- Zero new prompt work; reuses `interpret_priority_prompt.md`; cheap + auditable.
-
-2. **Headline strip** at the top of the page ("This period: revenue +48.7% on AOV +82% despite volume -9.6%; East carried growth"). One or two sentences, deterministic or a cached LLM line.
-
-## Parked (confirm before building)
-
-- **Cell drill-down "Ask why"** — hover/click a cell → deep agentic `analyze` scoped to `(metric, member filter)`. This is the roadmap's `scorecard analyze`; the highest-moat click, and also the biggest lift.
-- **Charting (multi-period time series)** — deliberately out of scope. We are a 2-period proof + story, not PowerBI.
-
-## Staged plan
-
-**Stage A (data + rendering, no LLM, low risk)**
-1. Include `measurement` + `basis` + per-member `current`/`prior` in the payload; tooltips show definition + evidence.
-2. Show `executive_questions` in each section header.
-3. Deterministic per-section callout (fastest/laggard cells, missing-data count).
-
-**Stage B (cached narrative)** — depends on Stage A.
-4. Generate + cache a per-section "What the numbers say" via the existing `interpret_priority` prompt on demand; render as a collapsible insight card under each matrix.
+**Stage B — cached narrative + answering-board** (depends on Stage A)
+8. Replace `interpret_priority`'s freeform narrative with **structured "What happened → Why" bullets** (per KPI: value + delta, driver, OFF flag, not-computable reason); cache per priority; render as a right-side notes rail per section.
+9. **Summary tab** — one table per scorecard: Question | Indicator | Callouts (rows = executive questions).
 
 **Park (confirm first)**
-5. Cell-level "Ask why" drill-down via agentic deep-dive.
+10. Cell-level "Ask why" drill-down via agentic deep-dive (the roadmap's `scorecard analyze`).
 
-## Next session questions
+## Open questions
 
-1. Stage B on or off? (Adds a cached LLM call per priority; makes the scorecard "the thing that explains the grid".)
-2. "Ask about this cell" — include now (runs the analysis) or defer?
+- **"Ask about this cell"** — include now (runs the analysis) or defer?
+- **Compute cell granularity** for multi-dimensional outcomes: per-dimension members + overall (starting point) vs cross-dimension combos (Region × Category) as a later enhancement.
